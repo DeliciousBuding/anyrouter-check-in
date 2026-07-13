@@ -40,27 +40,29 @@ from utils.proxy import get_playwright_proxy, get_proxy_server
 
 load_dotenv()
 
-BALANCE_HASH_FILE = 'balance_hash.txt'
+BALANCE_SNAPSHOT_FILE = 'balance_snapshot.json'
 
 
-def load_balance_hash():
-	"""加载余额hash"""
+def load_balance_snapshot():
+	"""加载余额快照 {hash, total_quota}"""
 	try:
-		if os.path.exists(BALANCE_HASH_FILE):
-			with open(BALANCE_HASH_FILE, 'r', encoding='utf-8') as f:
-				return f.read().strip()
+		if os.path.exists(BALANCE_SNAPSHOT_FILE):
+			with open(BALANCE_SNAPSHOT_FILE, 'r', encoding='utf-8') as f:
+				data = json.loads(f.read())
+				if isinstance(data, dict) and 'hash' in data:
+					return {'hash': data['hash'], 'total_quota': float(data.get('total_quota', 0))}
 	except Exception:  # nosec B110
 		pass
 	return None
 
 
-def save_balance_hash(balance_hash):
-	"""保存余额hash"""
+def save_balance_snapshot(snapshot):
+	"""保存余额快照"""
 	try:
-		with open(BALANCE_HASH_FILE, 'w', encoding='utf-8') as f:
-			f.write(balance_hash)
+		with open(BALANCE_SNAPSHOT_FILE, 'w', encoding='utf-8') as f:
+			json.dump(snapshot, f)
 	except Exception as e:
-		print(f'Warning: Failed to save balance hash: {e}')
+		print(f'Warning: Failed to save balance snapshot: {e}')
 
 
 def generate_balance_hash(balances):
@@ -503,7 +505,9 @@ async def main():
 
 	print(f'[INFO] Found {len(accounts)} account configurations')
 
-	last_balance_hash = load_balance_hash()
+	last_snapshot = load_balance_snapshot()
+	last_balance_hash = last_snapshot["hash"] if last_snapshot else None
+	last_total_quota = last_snapshot["total_quota"] if last_snapshot else 0.0
 
 	success_count = 0
 	total_count = len(accounts)
@@ -574,18 +578,21 @@ async def main():
 			need_notify = True
 			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
 
-	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
-	if current_balance_hash:
-		if last_balance_hash is None:
-			balance_changed = True
-			need_notify = True
-			print('[NOTIFY] First run detected, will send notification with current balances')
-		elif current_balance_hash != last_balance_hash:
-			balance_changed = True
-			need_notify = True
-			print('[NOTIFY] Balance changes detected, will send notification')
-		else:
-			print('[INFO] No balance changes detected')
+		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
+		current_total_quota = sum(v["quota"] for v in current_balances.values()) if current_balances else 0.0
+		if current_balance_hash:
+			if last_balance_hash is None:
+				balance_changed = True
+				need_notify = True
+				print("[NOTIFY] First run detected, will send notification with current balances")
+			elif current_total_quota > last_total_quota:
+				balance_changed = True
+				need_notify = True
+				print("[NOTIFY] Balance increased (sign-in reward), will send notification")
+			elif current_balance_hash != last_balance_hash:
+				print("[INFO] Balance decreased (consumption only), notification skipped")
+			else:
+				print("[INFO] No balance changes detected")
 
 	if balance_changed:
 		for i, account in enumerate(accounts):
@@ -598,7 +605,7 @@ async def main():
 					notification_content.append(account_result)
 
 	if current_balance_hash:
-		save_balance_hash(current_balance_hash)
+		save_balance_snapshot({"hash": current_balance_hash, "total_quota": current_total_quota})
 
 	if need_notify and notification_content:
 		summary = [
