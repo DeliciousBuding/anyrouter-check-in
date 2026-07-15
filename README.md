@@ -289,6 +289,13 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 ## 开启通知
 
+> 本 fork 的生产通知已收口为 **飞书 + 邮件**：每次运行发送飞书 MetAPI 卡片；邮件仅在首次成功、总余额变化绝对值 ≥ $1 或签到失败时发送。状态文件 `notify_state.json` 通过每次运行唯一的 GitHub Cache key 持久化。下方其他通道仅保留为上游参考，当前 workflow 不注入对应 Secrets。
+
+生产环境需要：
+
+- Repository Secret：`FEISHU_WEBHOOK`
+- Environment `production` Secrets：`EMAIL_USER`、`EMAIL_PASS`、`EMAIL_TO`、`CUSTOM_SMTP_SERVER`（`EMAIL_SENDER` 可选）
+
 脚本支持多种通知方式，可以通过配置以下环境变量开启，如果 `webhook` 有要求安全设置，例如钉钉，可以在新建机器人时选择自定义关键词，填写 `AnyRouter`。
 
 ### 邮箱通知(STMP)

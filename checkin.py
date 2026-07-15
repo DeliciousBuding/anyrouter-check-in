@@ -29,13 +29,12 @@ from utils.browser import (
 	navigate_login_page,
 	prepare_browser_page,
 	save_login_screenshot,
-	take_pending_screenshots,
 	verify_browser_login,
 	wait_for_waf_ready,
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import debug_print, is_debug_enabled
-from utils.notify import notify
+from utils.notify import smart_notify
 from utils.proxy import get_playwright_proxy, get_proxy_server
 
 load_dotenv()
@@ -498,9 +497,8 @@ async def main():
 
 	accounts = load_accounts_config()
 	if not accounts:
-		error_msg = '[FAILED] Unable to load account configuration, program exits'
-		print(error_msg)
-		notify.push_message('AnyRouter Check-in Alert', error_msg, msg_type='text')
+		print('[FAILED] 无法加载账号配置')
+		smart_notify([{"name": "config", "success": False, "balance": 0, "balance_delta": 0, "used": 0, "used_delta": 0, "reward": 0}])
 		sys.exit(1)
 
 	print(f'[INFO] Found {len(accounts)} account configurations')
@@ -607,41 +605,23 @@ async def main():
 	if current_balance_hash:
 		save_balance_snapshot({"hash": current_balance_hash, "total_quota": current_total_quota})
 
-	if need_notify and notification_content:
-		summary = [
-			'[STATS] Check-in result statistics:',
-			f'[SUCCESS] Success: {success_count}/{total_count}',
-			f'[FAIL] Failed: {total_count - success_count}/{total_count}',
-		]
+	# 收集结构化结果 → 智能通知（飞书卡片 每次 / 邮件 按状态机）
+	structured_results = []
+	for i, account in enumerate(accounts):
+		detail = account_check_in_details.get(f"account_{i + 1}", {})
+		structured_results.append({
+			"name":     detail.get("name", account.get_display_name(i)),
+			"success":  detail.get("success", False),
+			"balance":  float(detail.get("after_quota", 0)),
+			"balance_delta": float(detail.get("balance_change", 0)),
+			"used":     float(detail.get("after_used", 0)),
+			"used_delta": float(detail.get("usage_increase", 0)),
+			"reward":   float(detail.get("check_in_reward", 0)),
+		})
 
-		if success_count == total_count:
-			summary.append('[SUCCESS] All accounts check-in successful!')
-		elif success_count > 0:
-			summary.append('[WARN] Some accounts check-in successful')
-		else:
-			summary.append('[ERROR] All accounts check-in failed')
-
-		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-
-		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
-		screenshot_paths = take_pending_screenshots() if is_debug_enabled() else []
-		if screenshot_paths:
-			github_run_id = os.getenv('GITHUB_RUN_ID', '').strip()
-			github_repo = os.getenv('GITHUB_REPOSITORY', '').strip()
-			screenshot_hint = f'[SCREENSHOT] {len(screenshot_paths)} debug screenshot(s) saved'
-			if github_run_id and github_repo:
-				run_url = f'https://github.com/{github_repo}/actions/runs/{github_run_id}'
-				screenshot_hint += f'. Download artifact `checkin-screenshots-{github_run_id}` from: {run_url}'
-			else:
-				screenshot_hint += ' to `checkin_screenshots/`'
-			notify_content += f'\n\n{screenshot_hint}'
-
-		print(notify_content)
-		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
-		print('[NOTIFY] Notification sent due to failures or balance changes')
-	else:
-		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
-
+	print(f'[NOTIFY] smart notify: {success_count}/{total_count} ok')
+	sent = smart_notify(structured_results)
+	print(f'[NOTIFY] feishu={"ok" if sent["feishu"] else "skip"}  email={"ok" if sent["email"] else "skip"}')
 	sys.exit(0 if success_count > 0 else 1)
 
 

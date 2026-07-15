@@ -1,181 +1,176 @@
+"""
+AnyRouter 签到通知（简化版）
+规则：
+  - 每次签到 → 飞书 MetAPI 卡片（清爽，不占邮箱）
+  - 邮件 → 仅首次成功/余额剧变/失败
+  - 废弃渠道不配 secret
+"""
+import json
 import os
 import smtplib
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any
 
 import httpx
 
+TZ_HKT = timezone(timedelta(hours=8))
 
-class NotificationKit:
-	def __init__(self):
-		self.email_user: str = os.getenv('EMAIL_USER', '')
-		self.email_pass: str = os.getenv('EMAIL_PASS', '')
-		self.email_to: str = os.getenv('EMAIL_TO', '')
-		self.email_sender: str = os.getenv('EMAIL_SENDER', '')
-		self.smtp_server: str = os.getenv('CUSTOM_SMTP_SERVER', '')
-		self.pushplus_token = os.getenv('PUSHPLUS_TOKEN')
-		self.server_push_key = os.getenv('SERVERPUSHKEY')
-		self.dingding_webhook = os.getenv('DINGDING_WEBHOOK')
-		self.feishu_webhook = os.getenv('FEISHU_WEBHOOK')
-		self.weixin_webhook = os.getenv('WEIXIN_WEBHOOK')
-		self.gotify_url = os.getenv('GOTIFY_URL')
-		self.gotify_token = os.getenv('GOTIFY_TOKEN')
-		gotify_priority_env = os.getenv('GOTIFY_PRIORITY', '9')
-		self.gotify_priority = int(gotify_priority_env) if gotify_priority_env.strip() else 9
-		self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-		self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-		self.bark_key = os.getenv('BARK_KEY')
-		self.bark_server = os.getenv('BARK_SERVER', 'https://api.day.app')
+# 余额变化 > $1 才发邮件提醒
+BALANCE_CHANGE_EMAIL_THRESHOLD = 1.0
 
-	def _post_json(self, service: str, url: str, data: dict[str, Any]) -> httpx.Response:
-		with httpx.Client(timeout=30.0) as client:
-			response = client.post(url, json=data)
-
-		if response.status_code >= 400:
-			raise RuntimeError(f'{service} request failed: HTTP {response.status_code}')
-
-		try:
-			payload = response.json()
-		except ValueError:
-			return response
-
-		if not isinstance(payload, dict):
-			return response
-
-		error_msg = payload.get('errmsg') or payload.get('message') or payload.get('msg') or payload.get('error')
-		if payload.get('ok') is False:
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("description") or "ok=false"}')
-		if payload.get('errcode') not in (None, 0):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("errcode")}')
-		if payload.get('StatusCode') not in (None, 0):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("StatusCode")}')
-		if payload.get('code') not in (None, 0, 200):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("code")}')
-		if payload.get('ret') not in (None, 0, 1, 200):
-			raise RuntimeError(f'{service} request failed: {error_msg or payload.get("ret")}')
-
-		return response
-
-	def send_email(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
-		if not self.email_user or not self.email_pass or not self.email_to:
-			raise ValueError('Email configuration not set')
-
-		# 如果未设置 EMAIL_SENDER，使用 EMAIL_USER 作为默认值
-		sender = self.email_sender if self.email_sender else self.email_user
-
-		# MIMEText 需要 'plain' 或 'html'，而不是 'text'
-		mime_subtype = 'plain' if msg_type == 'text' else 'html'
-		msg = MIMEText(content, mime_subtype, 'utf-8')
-		msg['From'] = f'Anyrouter Checkin System <{sender}>'
-		msg['To'] = self.email_to
-		msg['Subject'] = title
-
-		smtp_server = self.smtp_server if self.smtp_server else f'smtp.{self.email_user.split("@")[1]}'
-		with smtplib.SMTP_SSL(smtp_server, 465) as server:
-			server.login(self.email_user, self.email_pass)
-			server.send_message(msg)
-
-	def send_pushplus(self, title: str, content: str):
-		if not self.pushplus_token:
-			raise ValueError('PushPlus Token not configured')
-
-		data = {'token': self.pushplus_token, 'title': title, 'content': content, 'template': 'html'}
-		self._post_json('PushPlus', 'http://www.pushplus.plus/send', data)
-
-	def send_serverPush(self, title: str, content: str):
-		if not self.server_push_key:
-			raise ValueError('Server Push key not configured')
-
-		data = {'title': title, 'desp': content}
-		self._post_json('Server Push', f'https://sctapi.ftqq.com/{self.server_push_key}.send', data)
-
-	def send_dingtalk(self, title: str, content: str):
-		if not self.dingding_webhook:
-			raise ValueError('DingTalk Webhook not configured')
-
-		data = {'msgtype': 'text', 'text': {'content': f'{title}\n{content}'}}
-		self._post_json('DingTalk', self.dingding_webhook, data)
-
-	def send_feishu(self, title: str, content: str):
-		if not self.feishu_webhook:
-			raise ValueError('Feishu Webhook not configured')
-
-		data = {
-			'msg_type': 'interactive',
-			'card': {
-				'elements': [{'tag': 'markdown', 'content': content, 'text_align': 'left'}],
-				'header': {'template': 'blue', 'title': {'content': title, 'tag': 'plain_text'}},
-			},
-		}
-		self._post_json('Feishu', self.feishu_webhook, data)
-
-	def send_wecom(self, title: str, content: str):
-		if not self.weixin_webhook:
-			raise ValueError('WeChat Work Webhook not configured')
-
-		data = {'msgtype': 'text', 'text': {'content': f'{title}\n{content}'}}
-		self._post_json('WeChat Work', self.weixin_webhook, data)
-
-	def send_gotify(self, title: str, content: str):
-		if not self.gotify_url or not self.gotify_token:
-			raise ValueError('Gotify URL or Token not configured')
-
-		# 使用环境变量配置的优先级，默认为9
-		priority = self.gotify_priority
-
-		# 确保优先级在有效范围内 (1-10)
-		priority = max(1, min(10, priority))
-
-		data = {'title': title, 'message': content, 'priority': priority}
-
-		url = f'{self.gotify_url}?token={self.gotify_token}'
-		self._post_json('Gotify', url, data)
-
-	def send_telegram(self, title: str, content: str):
-		if not self.telegram_bot_token or not self.telegram_chat_id:
-			raise ValueError('Telegram Bot Token or Chat ID not configured')
-
-		message = f'<b>{title}</b>\n\n{content}'
-		data = {'chat_id': self.telegram_chat_id, 'text': message, 'parse_mode': 'HTML'}
-		url = f'https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage'
-		self._post_json('Telegram', url, data)
-
-	def send_bark(self, title: str, content: str):
-		if not self.bark_key:
-			raise ValueError('Bark Key not configured')
-
-		# Bark API 支持 GET/POST，这里使用 POST JSON 方式支持更多参数
-		# 文档: https://bark.day.app/#/tutorial
-		url = f'{self.bark_server.rstrip("/")}/push'
-		data = {
-			'device_key': self.bark_key,
-			'title': title,
-			'body': content,
-			'icon': 'https://anyrouter.top/favicon.ico',  # 可选：尝试使用 AnyRouter 图标
-			'group': 'AnyRouter',
-		}
-
-		self._post_json('Bark', url, data)
-
-	def push_message(self, title: str, content: str, msg_type: Literal['text', 'html'] = 'text'):
-		notifications = [
-			('Email', lambda: self.send_email(title, content, msg_type)),
-			('PushPlus', lambda: self.send_pushplus(title, content)),
-			('Server Push', lambda: self.send_serverPush(title, content)),
-			('DingTalk', lambda: self.send_dingtalk(title, content)),
-			('Feishu', lambda: self.send_feishu(title, content)),
-			('WeChat Work', lambda: self.send_wecom(title, content)),
-			('Gotify', lambda: self.send_gotify(title, content)),
-			('Telegram', lambda: self.send_telegram(title, content)),
-			('Bark', lambda: self.send_bark(title, content)),
-		]
-
-		for name, func in notifications:
-			try:
-				func()
-				print(f'[{name}]: Message push successful!')
-			except Exception as e:
-				print(f'[{name}]: Message push failed! Reason: {str(e)}')
+STATE_FILE = Path("notify_state.json")
 
 
-notify = NotificationKit()
+def _read_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_state(state: dict) -> None:
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def _today() -> str:
+    return datetime.now(TZ_HKT).strftime("%Y-%m-%d")
+
+
+def _should_email(first_success_sent: bool, balance_delta: float) -> bool:
+    """仅首次成功或余额明显变化时发邮件。"""
+    return (not first_success_sent) or abs(balance_delta) >= BALANCE_CHANGE_EMAIL_THRESHOLD
+
+
+def _post_feishu(title: str, content_md: str, severity: str = "info") -> bool:
+    """向 MetAPI bot 发卡片"""
+    webhook = os.environ.get("FEISHU_WEBHOOK", "")
+    if not webhook:
+        return False
+    colors = {
+        "info": "blue",
+        "warning": "yellow",
+        "critical": "red",
+        "success": "green",
+    }
+    template = colors.get(severity, "blue")
+    card = {
+        "msg_type": "interactive",
+        "card": {
+            "header": {"template": template, "title": {"content": title, "tag": "plain_text"}},
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": content_md}},
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": f"MetAPI · GHA cron 每 6h  ·  {datetime.now(TZ_HKT).strftime('%Y-%m-%d %H:%M HKT')}",
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+    try:
+        body = json.dumps(card, ensure_ascii=False).encode("utf-8")
+        with httpx.Client(timeout=10) as c:
+            r = c.post(webhook, content=body, headers={"Content-Type": "application/json; charset=utf-8"})
+        if r.status_code >= 300:
+            return False
+        try:
+            response = r.json()
+        except ValueError:
+            return False
+        return response.get("StatusCode", 0) in (0, None) and response.get("code", 0) in (0, None)
+    except Exception:
+        return False
+
+
+def _send_email(title: str, content_html: str) -> bool:
+    user = os.environ.get("EMAIL_USER", "")
+    pwd = os.environ.get("EMAIL_PASS", "")
+    to = os.environ.get("EMAIL_TO", "delicious233@qq.com")
+    sender = os.environ.get("EMAIL_SENDER", "") or user
+    smtp_srv = os.environ.get("CUSTOM_SMTP_SERVER", "")
+    if not user or not pwd:
+        return False
+    try:
+        msg = MIMEText(content_html, "html", "utf-8")
+        msg["From"] = f"AnyRouter Checkin <{sender}>"
+        msg["To"] = to
+        msg["Subject"] = title
+        server = smtp_srv if smtp_srv else f"smtp.{user.split('@')[1]}"
+        with smtplib.SMTP_SSL(server, 465) as s:
+            s.login(user, pwd)
+            s.send_message(msg)
+        return True
+    except Exception:
+        return False
+
+
+def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
+    """
+    results = [
+      {
+        "name": "anyrouter.top",
+        "success": True,
+        "balance": 3.14,
+        "balance_delta": 0.23,
+        "used": 1.86,
+        "used_delta": 0.05,
+        "reward": 0.14,
+      },
+      ...
+    ]
+    """
+    state = _read_state()
+    today = _today()
+    first_success_sent = bool(state.get("success_email_sent", False))
+
+    all_ok = all(r["success"] for r in results)
+    total_balance = sum(r.get("balance", 0) for r in results)
+    total_delta = sum(r.get("balance_delta", 0) for r in results)
+
+    # ── 飞书卡片：每次发 ──────────────────────────────────────────────
+    items_md = ""
+    for r in results:
+        status = "✅" if r["success"] else "❌"
+        name = r["name"]
+        bal = r.get("balance", 0)
+        delta = r.get("balance_delta", 0)
+        reward = r.get("reward", 0)
+        delta_str = f"（{delta:+.2f}）" if delta != 0 else ""
+        reward_str = f" +${reward:.2f}" if reward > 0 else ""
+        items_md += f"{status} **{name}**：${bal:.2f}{delta_str}{reward_str}\n"
+
+    sev = "success" if all_ok else "critical"
+    title = f"签到完成 · {len([r for r in results if r['success']])}/{len(results)}"
+    fs_ok = _post_feishu(title, items_md, severity=sev)
+
+    # ── 邮件：按状态机 ────────────────────────────────────────────────
+    email_sent = False
+    if not all_ok:
+        # 失败必须邮件通知
+        email_sent = _send_email(
+            f"[AnyRouter] 签到异常 · {today}",
+            f"<h3>签到失败</h3><pre>{json.dumps(results, ensure_ascii=False, indent=2)}</pre>",
+        )
+    elif _should_email(first_success_sent, total_delta):
+        email_sent = _send_email(
+            f"[AnyRouter] 签到 · {today}  余额 ${total_balance:.2f}",
+            f"<p>总余额：<b>${total_balance:.2f}</b>（{total_delta:+.2f}）</p>"
+            + f"<p>时间：{datetime.now(TZ_HKT)}</p>",
+        )
+
+    # ── 更新状态（仅成功时）───────────────────────────────────────────
+    if all_ok:
+        # SMTP 失败时不能伪装成已投递；下次计划任务应继续重试首次成功邮件。
+        if email_sent:
+            state["success_email_sent"] = True
+            state["last_email_day"] = today
+        state["last_balance"] = total_balance
+        _write_state(state)
+
+    return {"feishu": fs_ok, "email": email_sent}
