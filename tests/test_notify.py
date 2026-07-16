@@ -61,10 +61,75 @@ def test_first_success_email_is_persisted_and_not_repeated(monkeypatch, isolated
     second = notify.smart_notify([_result()])
 
     assert first == {"feishu": True, "email": True}
-    assert second == {"feishu": True, "email": False}
+    assert second == {"feishu": False, "email": False}
     assert send_email.call_count == 1
     state = json.loads(isolated_state.read_text(encoding="utf-8"))
     assert state["success_email_sent"] is True
+    assert state["last_feishu_day"] == notify._today()
+
+
+def test_all_ok_feishu_is_daily_summary_not_every_run(monkeypatch, isolated_state):
+    isolated_state.write_text(
+        json.dumps(
+            {
+                "success_email_sent": True,
+                "last_balance": 3.0,
+                "last_feishu_day": notify._today(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    post_feishu = MagicMock(return_value=True)
+    monkeypatch.setattr(notify, "_post_feishu", post_feishu)
+    monkeypatch.setattr(notify, "_send_email", MagicMock(return_value=True))
+
+    result = notify.smart_notify([_result(balance=3.0, delta=0.0)])
+
+    assert result == {"feishu": False, "email": False}
+    post_feishu.assert_not_called()
+
+
+def test_all_ok_feishu_sends_on_new_day_or_large_balance_change(monkeypatch, isolated_state):
+    isolated_state.write_text(
+        json.dumps(
+            {
+                "success_email_sent": True,
+                "last_balance": 3.0,
+                "last_feishu_day": "2000-01-01",
+            }
+        ),
+        encoding="utf-8",
+    )
+    post_feishu = MagicMock(return_value=True)
+    monkeypatch.setattr(notify, "_post_feishu", post_feishu)
+    monkeypatch.setattr(notify, "_send_email", MagicMock(return_value=True))
+
+    daily = notify.smart_notify([_result(balance=3.0, delta=0.0)])
+    assert daily == {"feishu": True, "email": False}
+    args = post_feishu.call_args.args
+    kwargs = post_feishu.call_args.kwargs
+    title, body = args[0], args[1]
+    severity = args[2] if len(args) > 2 else kwargs.get("severity")
+    assert "签到正常" in title
+    assert "总余额" in body
+    assert severity == "success"
+
+    post_feishu.reset_mock()
+    isolated_state.write_text(
+        json.dumps(
+            {
+                "success_email_sent": True,
+                "last_balance": 3.0,
+                "last_feishu_day": notify._today(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    change = notify.smart_notify(
+        [_result(balance=4.5, delta=notify.BALANCE_CHANGE_EMAIL_THRESHOLD)]
+    )
+    assert change["feishu"] is True
+    post_feishu.assert_called_once()
 
 
 def test_failed_first_success_email_is_retried(monkeypatch, isolated_state):
