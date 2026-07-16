@@ -50,7 +50,7 @@ def _now_hkt() -> str:
 
 
 def _should_email(first_success_sent: bool, balance_delta: float) -> bool:
-    return (not first_success_sent) or abs(balance_delta) >= BALANCE_CHANGE_THRESHOLD
+    return (not first_success_sent) or balance_delta >= BALANCE_CHANGE_THRESHOLD
 
 
 def _should_feishu_all_ok(
@@ -59,7 +59,7 @@ def _should_feishu_all_ok(
     today: str,
     balance_delta: float,
 ) -> bool:
-    if abs(balance_delta) >= BALANCE_CHANGE_THRESHOLD:
+    if balance_delta >= BALANCE_CHANGE_THRESHOLD:
         return True
     return last_feishu_day != today
 
@@ -69,7 +69,7 @@ def _email_kind(first_success_sent: bool, balance_delta: float, all_ok: bool) ->
         return "failure"
     if not first_success_sent:
         return "first_success"
-    if abs(balance_delta) >= BALANCE_CHANGE_THRESHOLD:
+    if balance_delta >= BALANCE_CHANGE_THRESHOLD:
         return "balance_change"
     return "none"
 
@@ -233,14 +233,17 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
     today = _today()
     first_success_sent = bool(state.get("success_email_sent", False))
     last_feishu_day = str(state.get("last_feishu_day", "") or "")
-    last_balance = float(state.get("last_balance", 0) or 0)
 
     all_ok = all(bool(item.get("success")) for item in results)
     ok_count = sum(1 for item in results if item.get("success"))
     total_balance = sum(float(item.get("balance", 0) or 0) for item in results)
     total_delta = sum(float(item.get("balance_delta", 0) or 0) for item in results)
-    if last_balance and abs(total_balance - last_balance) > abs(total_delta):
-        total_delta = total_balance - last_balance
+    # Only earned balance is material for an immediate notification. Normal API
+    # consumption decreases quota frequently and must not turn a 6-hour check-in
+    # into a 6-hour "balance change" alert.
+    balance_increase = sum(
+        max(float(item.get("balance_delta", 0) or 0), 0.0) for item in results
+    )
 
     feishu_sent = False
     if not all_ok:
@@ -276,11 +279,11 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
     elif _should_feishu_all_ok(
         last_feishu_day=last_feishu_day,
         today=today,
-        balance_delta=total_delta,
+        balance_delta=balance_increase,
     ):
         footer_kind = (
             "balance_change"
-            if abs(total_delta) >= BALANCE_CHANGE_THRESHOLD
+            if balance_increase >= BALANCE_CHANGE_THRESHOLD
             else "daily"
         )
         body = (
@@ -288,11 +291,11 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
             f"**总余额**：${total_balance:.2f}\n"
             f"**较上次**：{total_delta:+.2f}"
         )
-        if abs(total_delta) >= BALANCE_CHANGE_THRESHOLD:
+        if balance_increase >= BALANCE_CHANGE_THRESHOLD:
             changed = []
             for item in results:
                 delta = float(item.get("balance_delta", 0) or 0)
-                if abs(delta) >= BALANCE_CHANGE_THRESHOLD:
+                if delta >= BALANCE_CHANGE_THRESHOLD:
                     bal = float(item.get("balance", 0) or 0)
                     changed.append(
                         f"• **{_account_label(item)}**：${bal:.2f}（{delta:+.2f}）"
@@ -309,7 +312,7 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
             state["last_feishu_day"] = today
 
     email_sent = False
-    kind = _email_kind(first_success_sent, total_delta, all_ok)
+    kind = _email_kind(first_success_sent, balance_increase, all_ok)
     if kind != "none":
         email_sent = _send_email(
             _email_subject(kind, today, total_balance),
@@ -318,7 +321,7 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
                 results=results,
                 ok_count=ok_count,
                 total_balance=total_balance,
-                total_delta=total_delta,
+                total_delta=balance_increase if kind == "balance_change" else total_delta,
             ),
         )
 

@@ -40,16 +40,18 @@ def _result(
     }
 
 
-def test_should_email_only_first_success_or_large_change():
+def test_should_email_only_first_success_or_large_increase():
     assert notify._should_email(False, 0.0) is True
     assert notify._should_email(True, 0.0) is False
     assert notify._should_email(True, notify.BALANCE_CHANGE_THRESHOLD) is True
+    assert notify._should_email(True, -notify.BALANCE_CHANGE_THRESHOLD) is False
 
 
 def test_email_kind_mapping():
     assert notify._email_kind(False, 0.0, True) == "first_success"
     assert notify._email_kind(True, 0.0, True) == "none"
     assert notify._email_kind(True, 1.5, True) == "balance_change"
+    assert notify._email_kind(True, -1.5, True) == "none"
     assert notify._email_kind(True, 0.0, False) == "failure"
 
 
@@ -152,6 +154,29 @@ def test_all_ok_feishu_is_daily_summary_not_every_run(monkeypatch, isolated_stat
 
     assert result == {"feishu": False, "email": False}
     post_feishu.assert_not_called()
+
+
+def test_same_day_consumption_drop_does_not_notify(monkeypatch, isolated_state):
+    isolated_state.write_text(
+        json.dumps(
+            {
+                "success_email_sent": True,
+                "last_balance": 100.0,
+                "last_feishu_day": notify._today(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    post_feishu = MagicMock(return_value=True)
+    send_email = MagicMock(return_value=True)
+    monkeypatch.setattr(notify, "_post_feishu", post_feishu)
+    monkeypatch.setattr(notify, "_send_email", send_email)
+
+    result = notify.smart_notify([_result(balance=70.0, delta=-30.0)])
+
+    assert result == {"feishu": False, "email": False}
+    post_feishu.assert_not_called()
+    send_email.assert_not_called()
 
 
 def test_all_ok_feishu_sends_on_new_day_or_large_balance_change(monkeypatch, isolated_state):
