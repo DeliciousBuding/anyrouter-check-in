@@ -176,8 +176,25 @@ class AccountConfig:
 		return bool(self.email and self.password)
 
 	def get_display_name(self, index: int) -> str:
-		"""获取显示名称"""
-		return self.name if self.name else f'Account {index + 1}'
+		"""获取显示名称：自定义名 > 邮箱 > Account N"""
+		if self.name:
+			return self.name
+		if self.email:
+			return self.email
+		return f'Account {index + 1}'
+
+	def get_identity(self, index: int) -> dict[str, str]:
+		"""通知用身份：name + email，失败时必须能定位到具体号。"""
+		fallback = f'Account {index + 1}'
+		name = self.name or fallback
+		email = self.email or ''
+		if email and name != email:
+			label = f'{name}（{email}）'
+		elif email:
+			label = email
+		else:
+			label = name
+		return {'name': name, 'email': email, 'label': label}
 
 
 def load_accounts_config() -> list[AccountConfig] | None:
