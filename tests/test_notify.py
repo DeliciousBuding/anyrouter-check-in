@@ -18,9 +18,19 @@ def isolated_state(monkeypatch, tmp_path):
     return state_file
 
 
-def _result(*, success=True, balance=3.0, delta=0.0, name="anyrouter.top"):
+def _result(
+    *,
+    success=True,
+    balance=3.0,
+    delta=0.0,
+    name="Account 1",
+    email="acct1@example.com",
+    label=None,
+):
     return {
         "name": name,
+        "email": email,
+        "label": label or (f"{name}（{email}）" if email and email not in name else name),
         "success": success,
         "balance": balance,
         "balance_delta": delta,
@@ -102,11 +112,23 @@ def test_failure_always_sends_email_and_feishu(monkeypatch, isolated_state):
     monkeypatch.setattr(notify, "_post_feishu", post_feishu)
     monkeypatch.setattr(notify, "_send_email", send_email)
 
-    result = notify.smart_notify([_result(success=False)])
+    failed = _result(
+        success=False,
+        name="主号",
+        email="main@example.com",
+        label="主号（main@example.com）",
+    )
+    ok = _result(success=True, name="备号", email="backup@example.com")
+    result = notify.smart_notify([failed, ok])
 
     assert result == {"feishu": True, "email": True}
     assert send_email.call_count == 1
     assert "签到失败" in send_email.call_args.args[0]
+    assert "main@example.com" in send_email.call_args.args[1]
+    title, body = post_feishu.call_args.args[:2]
+    assert "失败" in title
+    assert "主号（main@example.com）" in body
+    assert "失败账号" in body
     assert post_feishu.call_args.kwargs["severity"] == "critical"
     assert post_feishu.call_args.kwargs["footer_kind"] == "failure"
 

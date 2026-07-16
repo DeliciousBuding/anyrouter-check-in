@@ -524,16 +524,33 @@ async def main():
 
 			should_notify_this_account = False
 
+			identity = account.get_identity(i)
+			# Always record identity + success so failure notifications can name the account.
+			account_check_in_details[account_key] = {
+				'name': identity['name'],
+				'email': identity['email'],
+				'label': identity['label'],
+				'success': success,
+				'before_quota': 0.0,
+				'before_used': 0.0,
+				'after_quota': 0.0,
+				'after_used': 0.0,
+				'check_in_reward': 0.0,
+				'usage_increase': 0.0,
+				'balance_change': 0.0,
+			}
+
 			if not success:
 				should_notify_this_account = True
 				need_notify = True
-				account_name = account.get_display_name(i)
-				print(f'[NOTIFY] {account_name} failed, will send notification')
+				print(f'[NOTIFY] {identity["label"]} failed, will send notification')
 
 			if user_info_after and user_info_after.get('success'):
 				current_quota = user_info_after['quota']
 				current_used = user_info_after['used_quota']
 				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
+				account_check_in_details[account_key]['after_quota'] = current_quota
+				account_check_in_details[account_key]['after_used'] = current_used
 
 				if user_info_before and user_info_before.get('success'):
 					before_quota = user_info_before['quota']
@@ -548,8 +565,7 @@ async def main():
 					usage_increase = after_used - before_used
 					balance_change = after_quota - before_quota
 
-					account_check_in_details[account_key] = {
-						'name': account.get_display_name(i),
+					account_check_in_details[account_key].update({
 						'before_quota': before_quota,
 						'before_used': before_used,
 						'after_quota': after_quota,
@@ -557,11 +573,10 @@ async def main():
 						'check_in_reward': check_in_reward,
 						'usage_increase': usage_increase,
 						'balance_change': balance_change,
-						'success': success,
-					}
+					})
 
 			if should_notify_this_account:
-				account_name = account.get_display_name(i)
+				account_name = identity['label']
 				status = '[SUCCESS]' if success else '[FAIL]'
 				account_result = f'{status} {account_name}'
 				if user_info_after and user_info_after.get('success'):
@@ -571,10 +586,23 @@ async def main():
 				notification_content.append(account_result)
 
 		except Exception as e:
-			account_name = account.get_display_name(i)
-			print(f'[FAILED] {account_name} processing exception: {e}')
+			identity = account.get_identity(i)
+			account_check_in_details[account_key] = {
+				'name': identity['name'],
+				'email': identity['email'],
+				'label': identity['label'],
+				'success': False,
+				'before_quota': 0.0,
+				'before_used': 0.0,
+				'after_quota': 0.0,
+				'after_used': 0.0,
+				'check_in_reward': 0.0,
+				'usage_increase': 0.0,
+				'balance_change': 0.0,
+			}
+			print(f'[FAILED] {identity["label"]} processing exception: {e}')
 			need_notify = True
-			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
+			notification_content.append(f'[FAIL] {identity["label"]} exception: {str(e)[:50]}...')
 
 		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
 		current_total_quota = sum(v["quota"] for v in current_balances.values()) if current_balances else 0.0
@@ -609,14 +637,17 @@ async def main():
 	structured_results = []
 	for i, account in enumerate(accounts):
 		detail = account_check_in_details.get(f"account_{i + 1}", {})
+		identity = account.get_identity(i)
 		structured_results.append({
-			"name":     detail.get("name", account.get_display_name(i)),
-			"success":  detail.get("success", False),
-			"balance":  float(detail.get("after_quota", 0)),
-			"balance_delta": float(detail.get("balance_change", 0)),
-			"used":     float(detail.get("after_used", 0)),
-			"used_delta": float(detail.get("usage_increase", 0)),
-			"reward":   float(detail.get("check_in_reward", 0)),
+			"name": detail.get("name", identity["name"]),
+			"email": detail.get("email", identity["email"]),
+			"label": detail.get("label", identity["label"]),
+			"success": detail.get("success", False),
+			"balance": float(detail.get("after_quota", 0) or 0),
+			"balance_delta": float(detail.get("balance_change", 0) or 0),
+			"used": float(detail.get("after_used", 0) or 0),
+			"used_delta": float(detail.get("usage_increase", 0) or 0),
+			"reward": float(detail.get("check_in_reward", 0) or 0),
 		})
 
 	print(f'[NOTIFY] smart notify: {success_count}/{total_count} ok')

@@ -163,6 +163,22 @@ def _email_subject(kind: str, today: str, total_balance: float) -> str:
     return f"[AnyRouter] 签到 · {today}"
 
 
+def _account_label(item: dict[str, Any]) -> str:
+    """Prefer explicit label; otherwise name + email."""
+    label = str(item.get("label") or "").strip()
+    if label:
+        return label
+    name = str(item.get("name") or "").strip() or "?"
+    email = str(item.get("email") or "").strip()
+    if email and email not in name:
+        return f"{name}（{email}）"
+    return email or name
+
+
+def _failed_accounts(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in results if not item.get("success")]
+
+
 def _email_body(
     *,
     kind: str,
@@ -174,26 +190,38 @@ def _email_body(
     rows = []
     for item in results:
         status = "成功" if item.get("success") else "失败"
-        name = html.escape(str(item.get("name", "?")))
+        label = html.escape(_account_label(item))
+        email = html.escape(str(item.get("email") or ""))
         bal = float(item.get("balance", 0) or 0)
         delta = float(item.get("balance_delta", 0) or 0)
         rows.append(
-            f"<tr><td>{name}</td><td>{status}</td><td>${bal:.2f}</td><td>{delta:+.2f}</td></tr>"
+            f"<tr><td>{label}</td><td>{email or '-'}</td><td>{status}</td>"
+            f"<td>${bal:.2f}</td><td>{delta:+.2f}</td></tr>"
         )
     table = (
         "<table border='1' cellpadding='6' cellspacing='0'>"
-        "<tr><th>账户</th><th>状态</th><th>余额</th><th>变化</th></tr>"
+        "<tr><th>账号</th><th>邮箱</th><th>状态</th><th>余额</th><th>变化</th></tr>"
         + "".join(rows)
         + "</table>"
     )
-    if kind == "failure":
-        headline = "签到失败，请立即检查账号或站点。"
+    failed = _failed_accounts(results)
+    failed_block = ""
+    if kind == "failure" and failed:
+        items = "".join(
+            f"<li><b>{html.escape(_account_label(item))}</b>"
+            + (f" / {html.escape(str(item.get('email')))}" if item.get("email") and str(item.get("email")) not in _account_label(item) else "")
+            + "</li>"
+            for item in failed
+        )
+        failed_block = f"<p><b>失败账号（请优先处理）</b></p><ul>{items}</ul>"
+        headline = f"签到失败 {len(failed)} 个账号，请立即检查。"
     elif kind == "first_success":
         headline = "首次成功签到邮件，用于确认通知链路可用。"
     else:
         headline = "账户总余额发生明显变化。"
     return (
         f"<p><b>{html.escape(headline)}</b></p>"
+        f"{failed_block}"
         f"<p>成功：{ok_count}/{len(results)}　总余额：<b>${total_balance:.2f}</b>（{total_delta:+.2f}）</p>"
         f"<p>时间：{_now_hkt()}</p>"
         f"{table}"
@@ -216,18 +244,29 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
 
     feishu_sent = False
     if not all_ok:
-        lines = []
+        failed = _failed_accounts(results)
+        failed_lines = []
+        for item in failed:
+            label = _account_label(item)
+            email = str(item.get("email") or "").strip()
+            extra = f"\n   邮箱：{email}" if email and email not in label else ""
+            failed_lines.append(f"❌ **{label}**{extra}")
+        other_lines = []
         for item in results:
-            mark = "✅" if item.get("success") else "❌"
+            if not item.get("success"):
+                continue
             bal = float(item.get("balance", 0) or 0)
-            lines.append(f"{mark} **{item.get('name', '?')}**：${bal:.2f}")
+            other_lines.append(f"✅ {_account_label(item)}：${bal:.2f}")
         body = (
-            f"**成功**：{ok_count} / {len(results)}\n"
-            f"**总余额**：${total_balance:.2f}\n\n"
-            + "\n".join(lines)
+            f"**失败账号（{len(failed)}）**：\n"
+            + "\n".join(failed_lines)
+            + f"\n\n**成功**：{ok_count} / {len(results)}\n"
+            f"**总余额**：${total_balance:.2f}"
         )
+        if other_lines:
+            body += "\n\n**其余账号**：\n" + "\n".join(other_lines)
         feishu_sent = _post_feishu(
-            f"🔴 签到异常 · {ok_count}/{len(results)}",
+            f"🔴 签到异常 · 失败 {len(failed)}/{len(results)}",
             body,
             severity="critical",
             footer_kind="failure",
@@ -256,7 +295,7 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
                 if abs(delta) >= BALANCE_CHANGE_THRESHOLD:
                     bal = float(item.get("balance", 0) or 0)
                     changed.append(
-                        f"• **{item.get('name', '?')}**：${bal:.2f}（{delta:+.2f}）"
+                        f"• **{_account_label(item)}**：${bal:.2f}（{delta:+.2f}）"
                     )
             if changed:
                 body += "\n\n" + "\n".join(changed)
