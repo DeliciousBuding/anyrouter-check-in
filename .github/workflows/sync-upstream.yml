@@ -1,4 +1,4 @@
-name: Sync upstream
+name: Sync upstream & healthcheck
 
 on:
   schedule:
@@ -10,17 +10,68 @@ permissions:
   pull-requests: write
 
 jobs:
-  sync-upstream:
+  sync-and-healthcheck:
     runs-on: ubuntu-latest
+    env:
+      REPO: DeliciousBuding/anyrouter-check-in
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: 同步上游 main 到本 fork
+        id: sync
+        continue-on-error: true
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
           upstream_sync_repo: millylee/anyrouter-check-in
           upstream_sync_branch: main
           target_sync_branch: main
           target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 同步异常飞书通知
+        if: steps.sync.outcome == 'failure'
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          PR_CREATED: ${{ steps.sync.outputs.pr_created }}
+          PR_URL: ${{ steps.sync.outputs.pr_url }}
+          REPO: ${{ env.REPO }}
+        run: |
+          if [ "${PR_CREATED:-false}" = "true" ]; then
+            TEXT="⚠️ anyrouter-check-in 上游同步冲突，已自动开 PR 请处理: ${PR_URL}"
+          else
+            TEXT="⚠️ anyrouter-check-in 上游同步异常，请查看日志: https://github.com/${REPO}/actions"
+          fi
+          curl -fsSL -X POST "$FEISHU_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$TEXT\"}}"
+
+      - name: secrets 覆盖度自检
+        id: audit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ env.REPO }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          referenced=$(grep -rhoE 'secrets\.[A-Z0-9_]+' .github/workflows/*.yml | sed 's/secrets\.//' | sort -u)
+          configured=$( { gh api "repos/${REPO}/actions/secrets" --jq '.secrets[].name'; \
+                          gh api "repos/${REPO}/environments/production/secrets" --jq '.secrets[].name'; } | sort -u )
+          missing=$(comm -23 <(printf '%s\n' "$referenced") <(printf '%s\n' "$configured"))
+          if [ -n "$missing" ]; then
+            echo "MISSING_SECRETS=$(echo "$missing" | paste -sd, -)" >> "$GITHUB_OUTPUT"
+            echo "发现缺失 secrets: $missing"
+          else
+            echo "所有 workflow 引用的 secrets 均已配置 ✓"
+          fi
+
+      - name: 缺失 secret 飞书告警
+        if: steps.audit.outputs.missing_secrets != ''
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          MISSING: ${{ steps.audit.outputs.missing_secrets }}
+        run: |
+          curl -fsSL -X POST "$FEISHU_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ anyrouter-check-in 配置缺失 secrets: ${MISSING}，请到 Settings → Secrets 补充\"}}"
