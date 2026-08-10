@@ -12,6 +12,7 @@ permissions:
 jobs:
   sync-and-healthcheck:
     runs-on: ubuntu-latest
+    environment: production
     env:
       REPO: DeliciousBuding/anyrouter-check-in
     steps:
@@ -50,20 +51,49 @@ jobs:
       - name: secrets 覆盖度自检
         id: audit
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ env.REPO }}
+          # 上游 checkin.yml 引用的 secret 清单；为空视为未配置
+          ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
+          PROVIDERS: ${{ secrets.PROVIDERS }}
+          PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+          DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_SERVER: ${{ secrets.BARK_SERVER }}
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          referenced=$(grep -rhoE 'secrets\.[A-Z0-9_]+' .github/workflows/*.yml | sed 's/secrets\.//' | sort -u)
-          configured=$( { gh api "repos/${REPO}/actions/secrets" --jq '.secrets[].name'; \
-                          gh api "repos/${REPO}/environments/production/secrets" --jq '.secrets[].name'; } | sort -u )
-          missing=$(comm -23 <(printf '%s\n' "$referenced") <(printf '%s\n' "$configured"))
-          if [ -n "$missing" ]; then
-            echo "MISSING_SECRETS=$(echo "$missing" | paste -sd, -)" >> "$GITHUB_OUTPUT"
-            echo "发现缺失 secrets: $missing"
+          required="ANYROUTER_ACCOUNTS"
+          optional="PROVIDERS PROXY_SUBSCRIPTION_URL DINGDING_WEBHOOK EMAIL_USER EMAIL_PASS EMAIL_TO EMAIL_SENDER CUSTOM_SMTP_SERVER PUSHPLUS_TOKEN SERVERPUSHKEY FEISHU_WEBHOOK WEIXIN_WEBHOOK TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY BARK_KEY BARK_SERVER"
+          missing_required=""
+          missing_optional=""
+          for var in $required; do
+            value="${!var:-}"
+            if [ -z "$value" ]; then missing_required="$missing_required $var"; fi
+          done
+          for var in $optional; do
+            value="${!var:-}"
+            if [ -z "$value" ]; then missing_optional="$missing_optional $var"; fi
+          done
+          if [ -n "$missing_required" ]; then
+            echo "MISSING_SECRETS=$(echo "$missing_required" | xargs | tr ' ' ',')" >> "$GITHUB_OUTPUT"
+            echo "必须 secret 缺失:${missing_required}"
           else
-            echo "所有 workflow 引用的 secrets 均已配置 ✓"
+            echo "必须 secret ANYROUTER_ACCOUNTS 已配置 ✓"
+          fi
+          if [ -n "$missing_optional" ]; then
+            echo "可选 secret 未启用（不影响签到）:${missing_optional}"
           fi
 
       - name: 缺失 secret 飞书告警
@@ -74,4 +104,4 @@ jobs:
         run: |
           curl -fsSL -X POST "$FEISHU_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ anyrouter-check-in 配置缺失 secrets: ${MISSING}，请到 Settings → Secrets 补充\"}}"
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ anyrouter-check-in 必须 secret 缺失: ${MISSING}，签到将无法运行，请到 Settings → Secrets 补充\"}}"
