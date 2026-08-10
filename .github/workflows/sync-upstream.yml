@@ -13,10 +13,14 @@ jobs:
   sync-upstream:
     runs-on: ubuntu-latest
     steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: 同步上游 main 到本 fork
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
-          upstream_repo: millylee/anyrouter-check-in
-          upstream_branch: main
-          target_branch: main
-          merge_method: merge
+          upstream_sync_repo: millylee/anyrouter-check-in
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
