@@ -1,0 +1,22 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 同步上游 main 到本 fork
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          upstream_repo: millylee/anyrouter-check-in
+          upstream_branch: main
+          target_branch: main
+          merge_method: merge
