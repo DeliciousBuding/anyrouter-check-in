@@ -427,8 +427,9 @@ async def check_in_via_browser(
 ) -> tuple[bool, dict | None, dict | None, str | None]:
 	"""浏览器上下文内触发签到。
 
-	流程：注入 session cookie → 浏览器执行 JS 挑战过 WAF → /console 页面自身
-	请求 /api/user/self（站点前端会带 New-Api-User）→ 该请求即完成签到。
+	流程：注入 session cookie → 浏览器执行 JS 挑战过 WAF → 在页面上下文内显式
+	fetch /api/user/self（带 New-Api-User 头）→ 该请求即完成签到（agentrouter
+	的签到 = 登录查询）。数据中心 IP 的 httpx 会被 WAF 硬拦，必须走真实浏览器。
 	"""
 	settings = load_browser_login_settings(
 		account_name,
@@ -458,17 +459,16 @@ async def check_in_via_browser(
 		await page.goto(login_url, wait_until='domcontentloaded', timeout=60_000)
 		await wait_for_waf_ready(page)
 
-		console_url = f'{provider_config.domain}/console'
 		profile = None
-		for attempt in range(2):
-			profile = await verify_browser_login(page, console_url, settings.wait_timeout_ms)
-			if profile:
+		for attempt in range(3):
+			profile = await fetch_user_self_in_browser(page, account.api_user, account_name)
+			if profile is not None:
 				break
-			# /console 可能再触发一次挑战：等待挑战解决后重试
+			# WAF 可能对 API 路径再触发一次挑战：等待解决后重试
 			await wait_for_waf_ready(page)
 
 		if not profile:
-			message = '浏览器内 /api/user/self 验证失败（session 过期或 WAF 拦截）'
+			message = '浏览器内 /api/user/self 未返回有效用户信息（session 过期或 WAF 拦截）'
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
 
@@ -482,6 +482,39 @@ async def check_in_via_browser(
 	finally:
 		if context is not None:
 			await context.close()
+
+
+async def fetch_user_self_in_browser(page, api_user: str | None, account_name: str) -> dict | None:
+	"""在页面上下文内请求 /api/user/self（带 New-Api-User），返回用户 profile 或 None。
+
+	站点是多用户 NewAPI：仅凭 session cookie 会返回「未提供 New-Api-User」，
+	必须显式带头；api_user 在账号配置中提供。
+	"""
+	api_user = (api_user or '').strip()
+	script = """
+	async (apiUser) => {
+		const headers = {};
+		if (apiUser) { headers['New-Api-User'] = apiUser; }
+		const response = await fetch('/api/user/self', { credentials: 'include', headers });
+		return { status: response.status, text: await response.text() };
+	}
+	"""
+	result = await page.evaluate(script, api_user)
+	if not result:
+		print(f'[INFO] {account_name}: browser fetch returned nothing')
+		return None
+	if result.get('status') != 200:
+		print(f'[INFO] {account_name}: browser fetch HTTP {result.get("status")}')
+		return None
+	try:
+		payload = json.loads(result['text'])
+	except Exception:  # nosec B110
+		print(f'[INFO] {account_name}: browser fetch returned non-JSON (WAF challenge)')
+		return None
+	if payload.get('success') is True and isinstance(payload.get('data'), dict) and payload['data'].get('id'):
+		return payload['data']
+	print(f'[INFO] {account_name}: browser fetch success=false: {str(payload)[:120]}')
+	return None
 
 
 def format_user_info_from_profile(profile: dict) -> dict:
