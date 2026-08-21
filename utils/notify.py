@@ -179,6 +179,24 @@ def _failed_accounts(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in results if not item.get("success")]
 
 
+def _error_hint(error: str) -> str:
+    """把签到失败原因映射为可执行的处置提示。"""
+    error_lower = error.lower()
+    if "401" in error_lower:
+        return "会话过期，需要重新登录刷新 session cookies"
+    if "403" in error_lower:
+        return "额度不足或无权操作，检查上游余额/权限"
+    if "405" in error_lower:
+        return "接口方式不被接受，可能需换签到路径"
+    if "429" in error_lower:
+        return "请求过于频繁，稍后自动重试"
+    if "timeout" in error_lower or "timed out" in error_lower:
+        return "请求超时，检查网络/代理后重试"
+    if "waf" in error_lower or "acw" in error_lower or "html" in error_lower:
+        return "WAF 拦截，下轮自动用浏览器重新取 cookie"
+    return ""
+
+
 def _email_body(
     *,
     kind: str,
@@ -210,6 +228,7 @@ def _email_body(
         items = "".join(
             f"<li><b>{html.escape(_account_label(item))}</b>"
             + (f" / {html.escape(str(item.get('email')))}" if item.get("email") and str(item.get("email")) not in _account_label(item) else "")
+            + (f"<br>原因：{html.escape(str(item.get('error')))}" if item.get("error") else "")
             + "</li>"
             for item in failed
         )
@@ -253,7 +272,11 @@ def smart_notify(results: list[dict[str, Any]]) -> dict[str, bool]:
             label = _account_label(item)
             email = str(item.get("email") or "").strip()
             extra = f"\n   邮箱：{email}" if email and email not in label else ""
-            failed_lines.append(f"❌ **{label}**{extra}")
+            error = str(item.get("error") or "").strip()
+            error_line = f"\n   原因：{error}" if error else ""
+            hint = _error_hint(error)
+            hint_line = f"\n   💡 {hint}" if hint else ""
+            failed_lines.append(f"❌ **{label}**{extra}{error_line}{hint_line}")
         other_lines = []
         for item in results:
             if not item.get("success"):

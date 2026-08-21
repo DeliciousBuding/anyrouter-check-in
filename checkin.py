@@ -279,7 +279,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 
 
 def execute_check_in(client, account_name: str, provider_config, headers: dict):
-	"""执行签到请求"""
+	"""执行签到请求，返回 (success, error_msg)"""
 	print(f'[NETWORK] {account_name}: Executing check-in')
 
 	checkin_headers = headers.copy()
@@ -295,25 +295,27 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 			result = response.json()
 			if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
 				print(f'[SUCCESS] {account_name}: Check-in successful!')
-				return True
+				return True, None
 			else:
 				error_msg = result.get('msg', result.get('message', 'Unknown error'))
 				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
 				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
 					print(f'[SUCCESS] {account_name}: Already checked in today')
-					return True
+					return True, None
 				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
-				return False
+				return False, error_msg
 		except json.JSONDecodeError:
 			if 'success' in response.text.lower():
 				print(f'[SUCCESS] {account_name}: Check-in successful!')
-				return True
+				return True, None
 			else:
-				print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
-				return False
+				message = 'Invalid response format'
+				print(f'[FAILED] {account_name}: Check-in failed - {message}')
+				return False, message
 	else:
-		print(f'[FAILED] {account_name}: Check-in failed - HTTP {response.status_code}')
-		return False
+		message = f'HTTP {response.status_code}'
+		print(f'[FAILED] {account_name}: Check-in failed - {message}')
+		return False, message
 
 
 def format_check_in_notification(detail: dict) -> str:
@@ -352,14 +354,15 @@ def format_check_in_notification(detail: dict) -> str:
 
 
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
-	"""为单个账号执行签到操作"""
+	"""为单个账号执行签到操作，返回 (success, before, after, error_msg)"""
 	account_name = account.get_display_name(account_index)
 	print(f'\n[PROCESSING] Starting to process {account_name}')
 
 	provider_config = app_config.get_provider(account.provider)
 	if not provider_config:
-		print(f'[FAILED] {account_name}: Provider "{account.provider}" not found in configuration')
-		return False, None, None
+		message = f'Provider "{account.provider}" not found in configuration'
+		print(f'[FAILED] {account_name}: {message}')
+		return False, None, None, message
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
@@ -382,18 +385,20 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			resolved_api_user = login_result.api_user
 			auth_method = 'email/password'
 		else:
-			print(f'[FAILED] {account_name}: Email/password login failed, will not use stale session cookies')
-			return False, None, None
+			message = 'email/password 登录失败（未使用过期会话）'
+			print(f'[FAILED] {account_name}: {message}')
+			return False, None, None, message
 	else:
 		user_cookies = parse_cookies(account.cookies)
 		if not user_cookies:
-			print(f'[FAILED] {account_name}: Invalid configuration format')
-			return False, None, None
+			message = '账号配置缺少 cookies'
+			print(f'[FAILED] {account_name}: {message}')
+			return False, None, None, message
 		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 		auth_method = 'session cookies'
 
 	if not all_cookies:
-		return False, None, None
+		return False, None, None, '无法获取有效 cookies（WAF 或 session 异常）'
 
 	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
 
@@ -415,8 +420,8 @@ def run_check_in_requests(
 	*,
 	api_user_override: str | None = None,
 	use_proxy: bool = False,
-) -> tuple[bool, dict | None, dict | None]:
-	"""执行 HTTP 签到请求（同步，避免在 async 上下文中使用阻塞 httpx）。"""
+) -> tuple[bool, dict | None, dict | None, str | None]:
+	"""执行 HTTP 签到请求，返回 (success, before, after, error_msg)。同步执行。"""
 	try:
 		client_kwargs: dict = {'http2': True, 'timeout': 30.0}
 		proxy_url = get_proxy_server(use_proxy=use_proxy)
@@ -457,21 +462,22 @@ def run_check_in_requests(
 				print(user_info_before.get('error', 'Unknown error'))
 
 			if provider_config.needs_manual_check_in():
-				success = execute_check_in(client, account_name, provider_config, headers)
+				success, checkin_error = execute_check_in(client, account_name, provider_config, headers)
 				user_info_after = get_user_info(client, headers, user_info_url)
-				return success, user_info_before, user_info_after
+				return success, user_info_before, user_info_after, checkin_error
 
 			user_info_after = get_user_info(client, headers, user_info_url)
 			if user_info_after and user_info_after.get('success'):
 				print(f'[INFO] {account_name}: Check-in completed automatically (triggered by user info request)')
-				return True, user_info_before, user_info_after
+				return True, user_info_before, user_info_after, None
 			error = user_info_after.get('error', 'Unknown error') if user_info_after else 'Unknown error'
 			print(f'[FAILED] {account_name}: Auto check-in failed - {error}')
-			return False, user_info_before, user_info_after
+			return False, user_info_before, user_info_after, error
 
 	except Exception as e:
-		print(f'[FAILED] {account_name}: Error occurred during check-in process - {str(e)[:50]}...')
-		return False, None, None
+		message = str(e)[:80]
+		print(f'[FAILED] {account_name}: Error occurred during check-in process - {message}...')
+		return False, None, None, message
 
 
 async def main():
@@ -518,7 +524,7 @@ async def main():
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
 		try:
-			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
+			success, user_info_before, user_info_after, error_msg = await check_in_account(account, i, app_config)
 			if success:
 				success_count += 1
 
@@ -531,6 +537,7 @@ async def main():
 				'email': identity['email'],
 				'label': identity['label'],
 				'success': success,
+				'error': error_msg,
 				'before_quota': 0.0,
 				'before_used': 0.0,
 				'after_quota': 0.0,
@@ -579,6 +586,8 @@ async def main():
 				account_name = identity['label']
 				status = '[SUCCESS]' if success else '[FAIL]'
 				account_result = f'{status} {account_name}'
+				if error_msg:
+					account_result += f'\n原因: {error_msg}'
 				if user_info_after and user_info_after.get('success'):
 					account_result += f'\n{user_info_after["display"]}'
 				elif user_info_after:
@@ -592,6 +601,7 @@ async def main():
 				'email': identity['email'],
 				'label': identity['label'],
 				'success': False,
+				'error': str(e)[:80],
 				'before_quota': 0.0,
 				'before_used': 0.0,
 				'after_quota': 0.0,
@@ -643,6 +653,7 @@ async def main():
 			"email": detail.get("email", identity["email"]),
 			"label": detail.get("label", identity["label"]),
 			"success": detail.get("success", False),
+			"error": detail.get("error"),
 			"balance": float(detail.get("after_quota", 0) or 0),
 			"balance_delta": float(detail.get("balance_change", 0) or 0),
 			"used": float(detail.get("after_used", 0) or 0),

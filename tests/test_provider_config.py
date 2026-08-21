@@ -1,6 +1,6 @@
 import json
 
-from utils.config import AppConfig, ProviderConfig
+from utils.config import AccountConfig, AppConfig, ProviderConfig
 
 
 def test_builtin_provider_profile_persistence_defaults(monkeypatch):
@@ -10,6 +10,25 @@ def test_builtin_provider_profile_persistence_defaults(monkeypatch):
 
 	assert config.providers['anyrouter'].persist_profile is True
 	assert config.providers['agentrouter'].persist_profile is False
+
+
+def test_unnamed_account_fallback_includes_provider():
+	account = AccountConfig(cookies={'session': 'abc'}, provider='anyrouter')
+
+	identity = account.get_identity(2)
+
+	assert identity['name'] == 'Account 3 (anyrouter)'
+	assert identity['label'] == 'Account 3 (anyrouter)'
+
+
+def test_named_account_identity_prefers_name_and_email():
+	account = AccountConfig(cookies=None, provider='anyrouter', name='delicious233', email='d@example.com')
+
+	identity = account.get_identity(0)
+
+	assert identity['name'] == 'delicious233'
+	assert identity['email'] == 'd@example.com'
+	assert identity['label'] == 'delicious233（d@example.com）'
 
 
 def test_provider_profile_persistence_can_override_builtin(monkeypatch):

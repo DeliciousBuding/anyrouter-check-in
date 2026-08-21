@@ -176,16 +176,16 @@ class AccountConfig:
 		return bool(self.email and self.password)
 
 	def get_display_name(self, index: int) -> str:
-		"""获取显示名称：自定义名 > 邮箱 > Account N"""
+		"""获取显示名称：自定义名 > 邮箱 > Account N (provider)"""
 		if self.name:
 			return self.name
 		if self.email:
 			return self.email
-		return f'Account {index + 1}'
+		return f'Account {index + 1} ({self.provider})'
 
 	def get_identity(self, index: int) -> dict[str, str]:
 		"""通知用身份：name + email，失败时必须能定位到具体号。"""
-		fallback = f'Account {index + 1}'
+		fallback = f'Account {index + 1} ({self.provider})'
 		name = self.name or fallback
 		email = self.email or ''
 		if email and name != email:

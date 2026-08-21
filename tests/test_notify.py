@@ -237,3 +237,51 @@ def test_email_templates_are_operator_friendly():
     assert subject.startswith("[AnyRouter] 签到失败")
     assert "<table" in body
     assert "失败" in body
+
+
+def test_error_hint_mapping():
+    assert "会话过期" in notify._error_hint("HTTP 401")
+    assert "额度不足" in notify._error_hint("HTTP 403")
+    assert "请求过于频繁" in notify._error_hint("HTTP 429")
+    assert "请求超时" in notify._error_hint("request timed out")
+    assert "WAF" in notify._error_hint("received html challenge")
+    assert notify._error_hint("unknown weird error") == ""
+
+
+def test_failure_notification_includes_error_and_hint(monkeypatch, isolated_state):
+    isolated_state.write_text(
+        json.dumps({"success_email_sent": True, "last_balance": 3.0, "last_feishu_day": notify._today()}),
+        encoding="utf-8",
+    )
+    post_feishu = MagicMock(return_value=True)
+    monkeypatch.setattr(notify, "_post_feishu", post_feishu)
+    monkeypatch.setattr(notify, "_send_email", MagicMock(return_value=True))
+
+    failed = _result(
+        success=False,
+        name="Account 3 (anyrouter)",
+        email="",
+        label="Account 3 (anyrouter)",
+    )
+    failed["error"] = "HTTP 401"
+    ok = _result(success=True, name="xtrump@hnu.edu.cn", email="xtrump@hnu.edu.cn")
+    result = notify.smart_notify([failed, ok])
+
+    assert result == {"feishu": True, "email": True}
+    title, body = post_feishu.call_args.args[:2]
+    assert "失败 1/2" in title
+    assert "Account 3 (anyrouter)" in body
+    assert "HTTP 401" in body
+    assert "会话过期" in body
+    assert "xtrump@hnu.edu.cn" in body
+
+
+def test_email_failure_block_includes_error_reason():
+    body = notify._email_body(
+        kind="failure",
+        results=[_result(success=False, name="Account 3 (anyrouter)", email="") | {"error": "HTTP 401"}],
+        ok_count=0,
+        total_balance=0.0,
+        total_delta=0.0,
+    )
+    assert "HTTP 401" in body
