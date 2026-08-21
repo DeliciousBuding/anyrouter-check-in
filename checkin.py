@@ -18,6 +18,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 from utils.browser import (
 	BrowserLoginResult,
@@ -402,6 +403,12 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[AUTH] {account_name}: Using auth method -> {auth_method}')
 
+	# WAF 保护且无签到端点（agentrouter）的站点：签到由浏览器内 /api/user/self
+	# 查询触发。数据中心 IP 的 httpx 会被 WAF 硬拦，必须走真实浏览器上下文。
+	if provider_config.sign_in_path is None and provider_config.needs_waf_cookies():
+		print(f'[AUTH] {account_name}: Routing check-in through browser context')
+		return await check_in_via_browser(account, account_name, provider_config, all_cookies)
+
 	return run_check_in_requests(
 		all_cookies,
 		account,
@@ -410,6 +417,83 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		api_user_override=resolved_api_user,
 		use_proxy=provider_config.use_proxy,
 	)
+
+
+async def check_in_via_browser(
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+	all_cookies: dict,
+) -> tuple[bool, dict | None, dict | None, str | None]:
+	"""浏览器上下文内触发签到。
+
+	流程：注入 session cookie → 浏览器执行 JS 挑战过 WAF → /console 页面自身
+	请求 /api/user/self（站点前端会带 New-Api-User）→ 该请求即完成签到。
+	"""
+	settings = load_browser_login_settings(
+		account_name,
+		account.provider,
+		persist_profile=provider_config.persist_profile,
+	)
+	context = None
+	try:
+		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+		page = await context.new_page()
+		await prepare_browser_page(page)
+
+		domain = urlparse(provider_config.domain).hostname
+		session_cookies = [
+			{'name': name, 'value': value, 'domain': domain, 'path': '/'}
+			for name, value in all_cookies.items()
+			if name == 'session' and value
+		]
+		if not session_cookies:
+			message = '未提供 session cookie，无法浏览器内签到'
+			print(f'[FAILED] {account_name}: {message}')
+			return False, None, None, message
+		await context.add_cookies(session_cookies)
+
+		# 先访问登录页：让浏览器执行 WAF JS 挑战并落 WAF cookie
+		login_url = f'{provider_config.domain}{provider_config.login_path}'
+		await page.goto(login_url, wait_until='domcontentloaded', timeout=60_000)
+		await wait_for_waf_ready(page)
+
+		console_url = f'{provider_config.domain}/console'
+		profile = None
+		for attempt in range(2):
+			profile = await verify_browser_login(page, console_url, settings.wait_timeout_ms)
+			if profile:
+				break
+			# /console 可能再触发一次挑战：等待挑战解决后重试
+			await wait_for_waf_ready(page)
+
+		if not profile:
+			message = '浏览器内 /api/user/self 验证失败（session 过期或 WAF 拦截）'
+			print(f'[FAILED] {account_name}: {message}')
+			return False, None, None, message
+
+		user_info_after = format_user_info_from_profile(profile)
+		print(f'[SUCCESS] {account_name}: Check-in completed via browser (user info queried)')
+		return True, None, user_info_after, None
+	except Exception as exc:
+		message = str(exc)[:120]
+		print(f'[FAILED] {account_name}: Browser check-in error - {message}')
+		return False, None, None, message
+	finally:
+		if context is not None:
+			await context.close()
+
+
+def format_user_info_from_profile(profile: dict) -> dict:
+	"""把 /api/user/self 的 data 对象转成 get_user_info 同构结果。"""
+	quota = round(float(profile.get('quota', 0)) / 500000, 2)
+	used_quota = round(float(profile.get('used_quota', 0)) / 500000, 2)
+	return {
+		'success': True,
+		'quota': quota,
+		'used_quota': used_quota,
+		'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
+	}
 
 
 def run_check_in_requests(
