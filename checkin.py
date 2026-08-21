@@ -433,9 +433,11 @@ async def check_in_via_browser(
 ) -> tuple[bool, dict | None, dict | None, str | None]:
 	"""浏览器上下文内触发签到。
 
-	流程：注入 session cookie → 浏览器执行 JS 挑战过 WAF → 在页面上下文内显式
-	fetch /api/user/self（带 New-Api-User 头）→ 该请求即完成签到（agentrouter
-	的签到 = 登录查询）。数据中心 IP 的 httpx 会被 WAF 硬拦，必须走真实浏览器。
+	流程：注入 session cookie → 浏览器执行 JS 挑战过 WAF → 带 New-Api-User 头
+	做一次「文档导航」级 /api/user/self 请求（该请求即完成签到；agentrouter 的
+	签到 = 登录查询）。fetch() 不会执行 WAF 挑战页 JS，因此改用文档导航：挑战页
+	JS 自解后 reload，最终页面正文即 JSON 用户信息。数据中心 IP 的 httpx 会被
+	WAF 硬拦，必须走真实浏览器。
 	"""
 	settings = load_browser_login_settings(
 		account_name,
@@ -465,13 +467,18 @@ async def check_in_via_browser(
 		await page.goto(login_url, wait_until='domcontentloaded', timeout=60_000)
 		await wait_for_waf_ready(page)
 
-		profile = None
-		for attempt in range(3):
-			profile = await fetch_user_self_in_browser(page, account.api_user, account_name)
-			if profile is not None:
-				break
-			# WAF 可能对 API 路径再触发一次挑战：等待解决后重试
-			await wait_for_waf_ready(page)
+		profile = await request_user_self_via_document_navigation(
+			page, account, account_name, provider_config
+		)
+
+		# 兜底：页面内 fetch（正常情况下文档导航已拿到 profile）
+		if not profile:
+			for attempt in range(3):
+				profile = await fetch_user_self_in_browser(page, account.api_user, account_name)
+				if profile is not None:
+					break
+				# WAF 可能对 API 路径再触发一次挑战：等待解决后重试
+				await wait_for_waf_ready(page)
 
 		if not profile:
 			message = '浏览器内 /api/user/self 未返回有效用户信息（session 过期或 WAF 拦截）'
@@ -488,6 +495,64 @@ async def check_in_via_browser(
 	finally:
 		if context is not None:
 			await context.close()
+		print(f'[FAILED] {account_name}: Browser check-in error - {message}')
+		return False, None, None, message
+
+
+async def request_user_self_via_document_navigation(
+	page,
+	account: AccountConfig,
+	account_name: str,
+	provider_config,
+) -> dict | None:
+	"""文档导航到 /api/user/self 并解析正文 JSON。
+
+	通过 page.route 给该导航注入 New-Api-User 头。WAF 挑战页会在文档上下文中
+	执行自解 JS 并 reload（挑战自解时 route 拦截依然生效，头不丢），最终页面
+	正文就是 /api/user/self 的 JSON 响应。
+	"""
+	api_user = (account.api_user or '').strip()
+	api_url = f'{provider_config.domain}{provider_config.user_info_path}'
+
+	async def attach_user_header(route):
+		headers = {**route.request.headers}
+		if api_user:
+			headers['new-api-user'] = api_user
+		await route.continue_(headers=headers)
+
+	try:
+		await page.route('**/api/user/self', attach_user_header)
+		await page.goto(api_url, wait_until='domcontentloaded', timeout=60_000)
+	except Exception as exc:  # nosec B110
+		print(f'[WARN] {account_name}: document navigation unavailable ({str(exc)[:80]})')
+		return None
+
+	for _ in range(8):
+		await wait_for_waf_ready(page)
+		body_text = await page.evaluate('() => document.body ? (document.body.innerText || "") : ""')
+		if not body_text.strip():
+			await asyncio.sleep(3)
+			continue
+		parsed = None
+		try:
+			parsed = json.loads(body_text)
+		except Exception:  # nosec B110
+			parsed = None
+		if (
+			parsed
+			and isinstance(parsed, dict)
+			and parsed.get('success') is True
+			and isinstance(parsed.get('data'), dict)
+			and parsed['data'].get('id')
+		):
+			print(f'[INFO] {account_name}: document navigation returned user profile')
+			return parsed['data']
+		if parsed and isinstance(parsed, dict):
+			print(f'[INFO] {account_name}: API returned: {str(parsed)[:120]}')
+		else:
+			print(f'[INFO] {account_name}: page body not JSON yet (WAF challenge solving)')
+		await asyncio.sleep(3)
+	return None
 
 
 async def fetch_user_self_in_browser(page, api_user: str | None, account_name: str) -> dict | None:
