@@ -395,8 +395,14 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			message = '账号配置缺少 cookies'
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
-		all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
-		auth_method = 'session cookies'
+		if provider_config.sign_in_path is None and provider_config.needs_waf_cookies():
+			# 浏览器路由（agentrouter）：WAF 挑战由浏览器上下文自己执行解决，
+			# 无需也不该预取 WAF cookie（该站 /login 不下发 acw_sc__v2 等标记）。
+			all_cookies = user_cookies
+			auth_method = 'session cookies (browser)'
+		else:
+			all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
+			auth_method = 'session cookies'
 
 	if not all_cookies:
 		return False, None, None, '无法获取有效 cookies（WAF 或 session 异常）'
