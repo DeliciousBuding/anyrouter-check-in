@@ -356,7 +356,7 @@ def format_check_in_notification(detail: dict) -> str:
 
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
 	"""为单个账号执行签到操作，返回 (success, before, after, error_msg)"""
-	account_name = account.get_display_name(account_index)
+	account_name = account.get_log_label(account_index)
 	print(f'\n[PROCESSING] Starting to process {account_name}')
 
 	provider_config = app_config.get_provider(account.provider)
@@ -669,7 +669,9 @@ def run_check_in_requests(
 			user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
 			user_info_before = get_user_info(client, headers, user_info_url)
 			if user_info_before and user_info_before.get('success'):
-				print(user_info_before['display'])
+				# 金额不进日志：公开仓的 run 日志任何登录用户可读，余额等于把账号资产
+				# 公开。数值只走 smart_notify 的飞书/邮件私有通道。
+				print(f'[INFO] {account_name}: Pre check-in balance read ok')
 			elif user_info_before:
 				print(user_info_before.get('error', 'Unknown error'))
 
@@ -795,7 +797,7 @@ async def main():
 					})
 
 			if should_notify_this_account:
-				account_name = identity['label']
+				account_name = account.get_log_label(i)
 				status = '[SUCCESS]' if success else '[FAIL]'
 				account_result = f'{status} {account_name}'
 				if error_msg:
@@ -822,9 +824,9 @@ async def main():
 				'usage_increase': 0.0,
 				'balance_change': 0.0,
 			}
-			print(f'[FAILED] {identity["label"]} processing exception: {e}')
+			print(f'[FAILED] {account.get_log_label(i)} processing exception: {e}')
 			need_notify = True
-			notification_content.append(f'[FAIL] {identity["label"]} exception: {str(e)[:50]}...')
+			notification_content.append(f'[FAIL] {account.get_log_label(i)} exception: {str(e)[:50]}...')
 
 		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
 		current_total_quota = sum(v["quota"] for v in current_balances.values()) if current_balances else 0.0

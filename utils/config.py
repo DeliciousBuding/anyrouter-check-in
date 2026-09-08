@@ -175,13 +175,14 @@ class AccountConfig:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
 
-	def get_display_name(self, index: int) -> str:
-		"""获取显示名称：自定义名 > 邮箱 > Account N (provider)"""
-		if self.name:
-			return self.name
-		if self.email:
-			return self.email
-		return f'Account {index + 1} ({self.provider})'
+	def get_log_label(self, index: int) -> str:
+		"""日志、截图文件名、浏览器 profile 目录用的不透明别名。
+
+		本仓是公开仓：Actions 日志和 debug artifact 任何登录用户都能读，所以进日志的
+		账号标识一律用 `<provider>-<序号>`，不带 name/email。真实身份只经 get_identity()
+		进飞书/邮件通知（私有通道），失败时照样能定位到具体账号。
+		"""
+		return f'{self.provider}-{index + 1}'
 
 	def get_identity(self, index: int) -> dict[str, str]:
 		"""通知用身份：name + email，失败时必须能定位到具体号。"""
