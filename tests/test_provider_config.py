@@ -22,13 +22,13 @@ def test_unnamed_account_fallback_includes_provider():
 
 
 def test_named_account_identity_prefers_name_and_email():
-	account = AccountConfig(cookies=None, provider='anyrouter', name='delicious233', email='d@example.com')
+	account = AccountConfig(cookies=None, provider='anyrouter', name='sample-user', email='d@example.com')
 
 	identity = account.get_identity(0)
 
-	assert identity['name'] == 'delicious233'
+	assert identity['name'] == 'sample-user'
 	assert identity['email'] == 'd@example.com'
-	assert identity['label'] == 'delicious233（d@example.com）'
+	assert identity['label'] == 'sample-user（d@example.com）'
 
 
 def test_provider_profile_persistence_can_override_builtin(monkeypatch):

@@ -9,21 +9,24 @@ import json
 import os
 import sys
 from datetime import datetime
+from typing import Any, cast
 
 if hasattr(sys.stdout, 'reconfigure'):
 	sys.stdout.reconfigure(line_buffering=True)
 if hasattr(sys.stderr, 'reconfigure'):
 	sys.stderr.reconfigure(line_buffering=True)
 
+from urllib.parse import urlparse
+
 import httpx
 from cloakbrowser import launch_async
 from dotenv import load_dotenv
-from urllib.parse import urlparse
 
 from utils.browser import (
 	BrowserLoginResult,
 	has_session_cookie,
 	is_logged_in,
+	is_waf_challenge,
 	launch_login_context,
 	load_browser_login_settings,
 	login_with_email_form,
@@ -35,8 +38,17 @@ from utils.browser import (
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
 from utils.debug import debug_print, is_debug_enabled
+from utils.egress import EgressController, EgressRotator
 from utils.notify import smart_notify
 from utils.proxy import get_playwright_proxy, get_proxy_server
+from utils.retry import (
+	FailureKind,
+	LoginFlowError,
+	RetryAction,
+	RetryPolicy,
+	classify_failure,
+	decide_retry,
+)
 
 load_dotenv()
 
@@ -147,8 +159,9 @@ async def login_with_credentials(
 	provider_name: str,
 	email: str,
 	password: str,
-) -> BrowserLoginResult | None:
-	"""使用邮箱密码通过浏览器登录，返回 cookies 与拦截到的 api user id。"""
+) -> BrowserLoginResult:
+	"""使用邮箱密码通过浏览器登录，失败时抛出带分类的 LoginFlowError。"""
+
 	print(f'[PROCESSING] {account_name}: Logging in with email/password...')
 
 	login_url = f'{provider_config.domain}{provider_config.login_path}'
@@ -170,14 +183,17 @@ async def login_with_credentials(
 		f'({provider_name})'
 	)
 
-	try:
-		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
-	except Exception as e:
-		print(f'[FAILED] {account_name}: Browser launch failed: {e}')
-		return None
-
+	context = None
 	page = None
 	try:
+		try:
+			context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
+		except Exception as exc:
+			kind = classify_failure(str(exc))
+			if kind == FailureKind.UNKNOWN and provider_config.use_proxy:
+				kind = FailureKind.PROXY_UNAVAILABLE
+			raise LoginFlowError(kind, f'Browser launch failed: {str(exc)[:120]}') from exc
+
 		page = await context.new_page()
 		await prepare_browser_page(page)
 		await navigate_login_page(
@@ -206,34 +222,43 @@ async def login_with_credentials(
 		console_url = f'{provider_config.domain}/console'
 		user_profile = await verify_browser_login(page, console_url, timeout_ms)
 		if not user_profile:
-			cookies = await context.cookies()
-			cookie_names = [c.get('name') for c in cookies if c.get('name')]
-			print(f'[FAILED] {account_name}: Login failed - /api/user/self not verified')
-			debug_print(f'[INFO] {account_name}: Current URL: {page.url}')
-			debug_print(f'[INFO] {account_name}: Got cookies: {cookie_names}')
-			await save_login_screenshot(page, provider_name, account_name, 'not-authenticated')
-			await context.close()
-			return None
+			if await is_waf_challenge(page):
+				raise LoginFlowError(FailureKind.WAF_CHALLENGE, 'login verification blocked by WAF')
+			raise LoginFlowError(FailureKind.AUTH_INVALID, '/api/user/self did not return a user profile')
 
 		cookies = await context.cookies()
-		all_cookies = {
-			cookie.get('name'): cookie.get('value') for cookie in cookies if cookie.get('name') and cookie.get('value')
-		}
+		all_cookies: dict[str, str] = {}
+		for cookie in cookies:
+			name = cookie.get('name')
+			value = cookie.get('value')
+			if isinstance(name, str) and isinstance(value, str):
+				all_cookies[name] = value
 		api_user = str(user_profile['id']) if user_profile.get('id') is not None else None
 
 		success_msg = f'[SUCCESS] {account_name}: Login successful, got {len(all_cookies)} cookies'
 		if is_debug_enabled() and api_user:
 			success_msg += f', api_user={api_user}'
 		print(success_msg)
-		await context.close()
 		return BrowserLoginResult(cookies=all_cookies, api_user=api_user, profile=user_profile)
-
-	except Exception as e:
-		print(f'[FAILED] {account_name}: Error during login: {e}')
+	except LoginFlowError:
+		raise
+	except Exception as exc:
+		waf_challenge = await is_waf_challenge(page) if page is not None else False
+		if waf_challenge:
+			failure_kind = FailureKind.WAF_CHALLENGE
+		else:
+			failure_kind = classify_failure(str(exc))
+			if failure_kind == FailureKind.UNKNOWN:
+				failure_kind = FailureKind.TRANSIENT_NETWORK
 		if page is not None:
 			await save_login_screenshot(page, provider_name, account_name, 'login-error')
-		await context.close()
-		return None
+		raise LoginFlowError(failure_kind, str(exc)[:160]) from exc
+	finally:
+		if context is not None:
+			try:
+				await context.close()
+			except Exception:  # nosec B110
+				pass
 
 
 def get_user_info(client, headers, user_info_url: str):
@@ -354,7 +379,73 @@ def format_check_in_notification(detail: dict) -> str:
 	return '\n'.join(lines)
 
 
-async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
+async def login_with_retry(
+	account_name: str,
+	provider_config,
+	provider_name: str,
+	email: str,
+	password: str,
+	egress_rotator: EgressRotator | None = None,
+) -> BrowserLoginResult:
+	"""执行邮箱密码登录，并按失败类型在同节点重试或轮换出口。"""
+
+	policy = RetryPolicy.from_env()
+	same_node_retries = 0
+	last_error: LoginFlowError | None = None
+
+	for attempt in range(1, policy.max_attempts + 1):
+		try:
+			return await login_with_credentials(
+				account_name,
+				provider_config,
+				provider_name,
+				email,
+				password,
+			)
+		except LoginFlowError as exc:
+			last_error = exc
+			rotations = egress_rotator.rotations if egress_rotator else 0
+			decision = decide_retry(
+				exc.kind,
+				attempt=attempt,
+				same_node_retries=same_node_retries,
+				egress_rotations=rotations,
+				policy=policy,
+			)
+			print(f'[WARN] {account_name}: Login attempt {attempt}/{policy.max_attempts} failed [{exc.kind.value}]')
+			print(f'[INFO] {account_name}: Retry action={decision.action.value} reason={decision.reason}')
+
+			if decision.action == RetryAction.STOP:
+				break
+
+			if decision.action == RetryAction.ROTATE_EGRESS:
+				if egress_rotator is None:
+					print(f'[WARN] {account_name}: No egress controller available for rotation')
+					break
+				node, label = await egress_rotator.rotate()
+				if not node:
+					print(f'[WARN] {account_name}: No alternate egress node available')
+					break
+				same_node_retries = 0
+				print(
+					f'[INFO] {account_name}: Rotated egress node_sha={label} '
+					f'({egress_rotator.rotations}/{policy.max_egress_rotations})'
+				)
+			elif decision.action == RetryAction.RETRY_SAME:
+				same_node_retries += 1
+
+			if decision.delay_seconds:
+				await asyncio.sleep(decision.delay_seconds)
+
+	raise last_error or LoginFlowError(FailureKind.UNKNOWN, 'login failed without a classified error')
+
+
+async def check_in_account(
+	account: AccountConfig,
+	account_index: int,
+	app_config: AppConfig,
+	egress_rotator: EgressRotator | None = None,
+):
 	"""为单个账号执行签到操作，返回 (success, before, after, error_msg)"""
 	account_name = account.get_log_label(account_index)
 	print(f'\n[PROCESSING] Starting to process {account_name}')
@@ -369,7 +460,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	if provider_config.use_proxy and not get_proxy_server(use_proxy=True):
 		# 该 provider 必须走代理：数据中心 IP 会被下发滑块人机验证，登录页根本不渲染。
-		# 代理没起来时直连只会烧掉 3 轮登录重试，还会把失败原因误报成「站点拦截」
+		# 代理没起来时直连只会烧掉多轮登录重试，还会把失败原因误报成「站点拦截」
 		# 而不是「代理未就绪」——两者处置方式完全不同，必须区分开。
 		message = '代理未就绪（CHECKIN_PROXY_URL 为空），已跳过直连尝试'
 		print(f'[FAILED] {account_name}: {message}')
@@ -382,28 +473,29 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	if account.has_login_credentials():
 		print(f'[INFO] {account_name}: Attempting email/password login (priority)...')
 		assert account.email is not None and account.password is not None
-		login_result = await login_with_credentials(
-			account_name,
-			provider_config,
-			account.provider,
-			account.email,
-			account.password,
-		)
-		if login_result:
-			all_cookies = login_result.cookies
-			resolved_api_user = login_result.api_user
-			auth_method = 'email/password'
-			if not provider_config.needs_manual_check_in() and login_result.profile:
-				# 无签到端点的站点（agentrouter）：真实登录本身就是签到动作，余额已在
-				# 登录校验的同一会话里拿到。再开一个浏览器上下文重新过 WAF，只会在数据
-				# 中心 IP 上多一次失败机会（08-21 实测那条路连续 8 次拿不到 JSON）。
-				print(f'[AUTH] {account_name}: Using auth method -> email/password (login-triggered check-in)')
-				print(f'[SUCCESS] {account_name}: Check-in completed by fresh login (user info verified)')
-				return True, None, format_user_info_from_profile(login_result.profile), None
-		else:
-			message = 'email/password 登录失败（未使用过期会话）'
+		try:
+			login_result = await login_with_retry(
+				account_name,
+				provider_config,
+				account.provider,
+				account.email,
+				account.password,
+				egress_rotator=egress_rotator if provider_config.use_proxy else None,
+			)
+		except LoginFlowError as exc:
+			message = str(exc)
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
+		all_cookies = login_result.cookies
+		resolved_api_user = login_result.api_user
+		auth_method = 'email/password'
+		if not provider_config.needs_manual_check_in() and login_result.profile:
+			# 无签到端点的站点（agentrouter）：真实登录本身就是签到动作，余额已在
+			# 登录校验的同一会话里拿到。再开一个浏览器上下文重新过 WAF，只会在数据
+			# 中心 IP 上多一次失败机会（08-21 实测那条路连续 8 次拿不到 JSON）。
+			print(f'[AUTH] {account_name}: Using auth method -> email/password (login-triggered check-in)')
+			print(f'[SUCCESS] {account_name}: Check-in completed by fresh login (user info verified)')
+			return True, None, format_user_info_from_profile(login_result.profile), None
 	else:
 		user_cookies = parse_cookies(account.cookies)
 		if not user_cookies:
@@ -483,7 +575,7 @@ async def check_in_via_browser(
 			message = '未提供 session cookie，无法浏览器内签到'
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
-		await context.add_cookies(session_cookies)
+		await context.add_cookies(cast(Any, session_cookies))
 
 		# 先访问登录页：让浏览器执行 WAF JS 挑战并落 WAF cookie
 		login_url = f'{provider_config.domain}{provider_config.login_path}'
@@ -562,15 +654,11 @@ async def request_user_self_via_document_navigation(
 			parsed = json.loads(body_text)
 		except Exception:  # nosec B110
 			parsed = None
-		if (
-			parsed
-			and isinstance(parsed, dict)
-			and parsed.get('success') is True
-			and isinstance(parsed.get('data'), dict)
-			and parsed['data'].get('id')
-		):
-			print(f'[INFO] {account_name}: document navigation returned user profile')
-			return parsed['data']
+		if parsed and isinstance(parsed, dict) and parsed.get('success') is True:
+			data = parsed.get('data')
+			if isinstance(data, dict) and data.get('id'):
+				print(f'[INFO] {account_name}: document navigation returned user profile')
+				return data
 		if parsed and isinstance(parsed, dict):
 			print(f'[INFO] {account_name}: API returned: {str(parsed)[:120]}')
 		else:
@@ -606,8 +694,10 @@ async def fetch_user_self_in_browser(page, api_user: str | None, account_name: s
 	except Exception:  # nosec B110
 		print(f'[INFO] {account_name}: browser fetch returned non-JSON (WAF challenge)')
 		return None
-	if payload.get('success') is True and isinstance(payload.get('data'), dict) and payload['data'].get('id'):
-		return payload['data']
+	if payload.get('success') is True:
+		data = payload.get('data')
+		if isinstance(data, dict) and data.get('id'):
+			return data
 	print(f'[INFO] {account_name}: browser fetch success=false: {str(payload)[:120]}')
 	return None
 
@@ -718,14 +808,34 @@ async def main():
 	accounts = load_accounts_config()
 	if not accounts:
 		print('[FAILED] 无法加载账号配置')
-		smart_notify([{"name": "config", "success": False, "balance": 0, "balance_delta": 0, "used": 0, "used_delta": 0, "reward": 0}])
+		smart_notify(
+			[
+				{
+					'name': 'config',
+					'success': False,
+					'balance': 0,
+					'balance_delta': 0,
+					'used': 0,
+					'used_delta': 0,
+					'reward': 0,
+				}
+			]
+		)
 		sys.exit(1)
 
 	print(f'[INFO] Found {len(accounts)} account configurations')
 
+	retry_policy = RetryPolicy.from_env()
+	egress_controller = EgressController.from_env()
+	egress_rotator = EgressRotator(egress_controller, retry_policy.max_egress_rotations) if egress_controller else None
+	if egress_rotator:
+		print('[INFO] Egress rotation controller enabled')
+	else:
+		print('[INFO] Egress rotation controller unavailable; WAF retries will stop after one attempt')
+
 	last_snapshot = load_balance_snapshot()
-	last_balance_hash = last_snapshot["hash"] if last_snapshot else None
-	last_total_quota = last_snapshot["total_quota"] if last_snapshot else 0.0
+	last_balance_hash = last_snapshot['hash'] if last_snapshot else None
+	last_total_quota = last_snapshot['total_quota'] if last_snapshot else 0.0
 
 	success_count = 0
 	total_count = len(accounts)
@@ -738,7 +848,9 @@ async def main():
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
 		try:
-			success, user_info_before, user_info_after, error_msg = await check_in_account(account, i, app_config)
+			success, user_info_before, user_info_after, error_msg = await check_in_account(
+				account, i, app_config, egress_rotator=egress_rotator
+			)
 			if success:
 				success_count += 1
 
@@ -786,15 +898,17 @@ async def main():
 					usage_increase = after_used - before_used
 					balance_change = after_quota - before_quota
 
-					account_check_in_details[account_key].update({
-						'before_quota': before_quota,
-						'before_used': before_used,
-						'after_quota': after_quota,
-						'after_used': after_used,
-						'check_in_reward': check_in_reward,
-						'usage_increase': usage_increase,
-						'balance_change': balance_change,
-					})
+					account_check_in_details[account_key].update(
+						{
+							'before_quota': before_quota,
+							'before_used': before_used,
+							'after_quota': after_quota,
+							'after_used': after_used,
+							'check_in_reward': check_in_reward,
+							'usage_increase': usage_increase,
+							'balance_change': balance_change,
+						}
+					)
 
 			if should_notify_this_account:
 				account_name = account.get_log_label(i)
@@ -829,20 +943,20 @@ async def main():
 			notification_content.append(f'[FAIL] {account.get_log_label(i)} exception: {str(e)[:50]}...')
 
 		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
-		current_total_quota = sum(v["quota"] for v in current_balances.values()) if current_balances else 0.0
+		current_total_quota = sum(v['quota'] for v in current_balances.values()) if current_balances else 0.0
 		if current_balance_hash:
 			if last_balance_hash is None:
 				balance_changed = True
 				need_notify = True
-				print("[NOTIFY] First run detected, will send notification with current balances")
+				print('[NOTIFY] First run detected, will send notification with current balances')
 			elif current_total_quota > last_total_quota:
 				balance_changed = True
 				need_notify = True
-				print("[NOTIFY] Balance increased (sign-in reward), will send notification")
+				print('[NOTIFY] Balance increased (sign-in reward), will send notification')
 			elif current_balance_hash != last_balance_hash:
-				print("[INFO] Balance decreased (consumption only), notification skipped")
+				print('[INFO] Balance decreased (consumption only), notification skipped')
 			else:
-				print("[INFO] No balance changes detected")
+				print('[INFO] No balance changes detected')
 
 	if balance_changed:
 		for i, account in enumerate(accounts):
@@ -855,30 +969,38 @@ async def main():
 					notification_content.append(account_result)
 
 	if current_balance_hash:
-		save_balance_snapshot({"hash": current_balance_hash, "total_quota": current_total_quota})
+		save_balance_snapshot({'hash': current_balance_hash, 'total_quota': current_total_quota})
 
 	# 收集结构化结果 → 智能通知（飞书卡片 每次 / 邮件 按状态机）
 	structured_results = []
 	for i, account in enumerate(accounts):
-		detail = account_check_in_details.get(f"account_{i + 1}", {})
+		detail = account_check_in_details.get(f'account_{i + 1}', {})
 		identity = account.get_identity(i)
-		structured_results.append({
-			"name": detail.get("name", identity["name"]),
-			"email": detail.get("email", identity["email"]),
-			"label": detail.get("label", identity["label"]),
-			"success": detail.get("success", False),
-			"error": detail.get("error"),
-			"balance": float(detail.get("after_quota", 0) or 0),
-			"balance_delta": float(detail.get("balance_change", 0) or 0),
-			"used": float(detail.get("after_used", 0) or 0),
-			"used_delta": float(detail.get("usage_increase", 0) or 0),
-			"reward": float(detail.get("check_in_reward", 0) or 0),
-		})
+		structured_results.append(
+			{
+				'name': detail.get('name', identity['name']),
+				'email': detail.get('email', identity['email']),
+				'label': detail.get('label', identity['label']),
+				'success': detail.get('success', False),
+				'error': detail.get('error'),
+				'balance': float(detail.get('after_quota', 0) or 0),
+				'balance_delta': float(detail.get('balance_change', 0) or 0),
+				'used': float(detail.get('after_used', 0) or 0),
+				'used_delta': float(detail.get('usage_increase', 0) or 0),
+				'reward': float(detail.get('check_in_reward', 0) or 0),
+			}
+		)
+
+	if egress_rotator and egress_rotator.rotations:
+		print(f'[INFO] Egress rotations used: {egress_rotator.rotations}')
 
 	print(f'[NOTIFY] smart notify: {success_count}/{total_count} ok')
 	sent = smart_notify(structured_results)
 	print(f'[NOTIFY] feishu={"ok" if sent["feishu"] else "skip"}  email={"ok" if sent["email"] else "skip"}')
-	sys.exit(0 if success_count > 0 else 1)
+	strict = os.getenv('CHECKIN_STRICT', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
+	if success_count == total_count:
+		sys.exit(0)
+	sys.exit(1 if strict or success_count == 0 else 0)
 
 
 def run_main():

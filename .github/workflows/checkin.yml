@@ -81,16 +81,19 @@ jobs:
         restore-keys: notify-state-
 
     - name: 恢复浏览器 Profile
-      uses: actions/cache@v5
+      # 浏览器 profile 可能含登录态；公开仓默认不持久化，私有 fork 可显式打开。
+      if: vars.ENABLE_BROWSER_PROFILE_CACHE == 'true'
+      uses: actions/cache/restore@v5
       with:
         path: .browser_profiles
-        key: browser-profiles-${{ runner.os }}-v1
+        key: browser-profiles-${{ runner.os }}-${{ hashFiles('.browser_profiles/**') }}
         restore-keys: |
           browser-profiles-${{ runner.os }}-
 
     - name: 配置代理
       env:
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+        PROXY_SUBSCRIPTION_URL_FALLBACK: ${{ secrets.PROXY_SUBSCRIPTION_URL_FALLBACK }}
         # 出口地区收窄规则也走 secret：公开仓里不写明我们从哪个地区出去
         PROXY_NODE_FILTER: ${{ secrets.PROXY_NODE_FILTER }}
         PROXY_TEST_URL: https://www.google.com/generate_204
@@ -106,6 +109,9 @@ jobs:
         CHECKIN_HEADLESS: false
         CHECKIN_HUMANIZE: true
         CHECKIN_WAIT_TIMEOUT_MS: 120000
+        CHECKIN_STRICT: 'true'
+        CHECKIN_MAX_ATTEMPTS: '3'
+        CHECKIN_MAX_EGRESS_ROTATIONS: '2'
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
@@ -129,6 +135,14 @@ jobs:
         if-no-files-found: warn
         include-hidden-files: true
         retention-days: 14
+
+    - name: 保存浏览器 Profile
+      if: always() && vars.ENABLE_BROWSER_PROFILE_CACHE == 'true' && hashFiles('.browser_profiles/**') != ''
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: .browser_profiles
+        key: browser-profiles-${{ runner.os }}-${{ hashFiles('.browser_profiles/**') }}
 
     - name: 停止代理
       if: always()

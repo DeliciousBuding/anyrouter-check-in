@@ -287,6 +287,32 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 如果使用订阅脚本，默认会用 `https://www.google.com/generate_204` 测试代理连通性；也可以通过 `PROXY_TEST_URL` 覆盖。
 
+可选备用订阅：
+
+- `PROXY_SUBSCRIPTION_URL_FALLBACK`：主订阅全部节点不可用时参与选路的第二订阅。与主订阅共用 `PROXY_NODE_FILTER`，没有配置时自动跳过。
+
+WAF 重试与出口轮换：
+
+- mihomo 默认用 `url-test` 在主/备用订阅中自动选择健康节点。
+- 检测到 WAF/人机验证时，不会在原节点机械重试，而是切换控制组节点并重新创建浏览器上下文。
+- 网络瞬断先在原节点重试一次，仍失败再换节点。
+- 邮箱密码错误、session 失效等认证失败不会换节点，直接告警。
+- AgentRouter 的 `use_proxy: true` 是 fail-closed：代理未就绪时跳过直连，避免用数据中心 IP 硬撞 WAF。
+
+可用环境变量：
+
+- `CHECKIN_MAX_ATTEMPTS`：单账号最大登录尝试次数，默认 `3`
+- `CHECKIN_MAX_EGRESS_ROTATIONS`：整轮最多换节点次数，默认 `2`
+- `CHECKIN_TRANSIENT_RETRY_DELAY_SECONDS`：瞬断重试等待，默认 `5`
+- `CHECKIN_EGRESS_RETRY_DELAY_SECONDS`：换节点前等待，默认 `8`
+- `CHECKIN_STRICT=true`：任一账号失败时 workflow 返回非零；本 fork 的生产 workflow 已启用
+
+状态持久化：
+
+- `balance_snapshot.json` 和 `notify_state.json` 通过 GitHub Actions cache 持久化，属于非敏感运行状态。
+- `.browser_profiles` 可能包含登录态，**公开仓默认不持久化**。仅私有 fork 或自建 runner 可设置仓库变量 `ENABLE_BROWSER_PROFILE_CACHE=true` 显式开启；开启后 cache key 包含 profile 内容哈希，可保存新版本。
+- 账号、密码、cookie、订阅 URL 只来自 GitHub Secrets，不写入仓库或公开日志。
+
 ## 开启通知
 
 > 本 fork 的生产通知已收口为 **飞书 + 邮件**：每次运行发送飞书 MetAPI 卡片；邮件仅在首次成功、总余额变化绝对值 ≥ $1 或签到失败时发送。状态文件 `notify_state.json` 通过每次运行唯一的 GitHub Cache key 持久化。下方其他通道仅保留为上游参考，当前 workflow 不注入对应 Secrets。
