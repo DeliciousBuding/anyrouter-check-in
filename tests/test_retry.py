@@ -17,6 +17,9 @@ from utils.retry import (
 		('net::ERR_CONNECTION_RESET', FailureKind.TRANSIENT_NETWORK),
 		('navigation interrupted by chrome-error://chromewebdata/', FailureKind.TRANSIENT_NETWORK),
 		('HTTP 401 unauthorized', FailureKind.AUTH_INVALID),
+		('HTTP 429', FailureKind.RATE_LIMITED),
+		('请求过于频繁，请稍后重试', FailureKind.RATE_LIMITED),
+		('too many login attempts', FailureKind.RATE_LIMITED),
 		('session expired', FailureKind.AUTH_INVALID),
 		('mihomo tunnel failed', FailureKind.PROXY_UNAVAILABLE),
 		('HTTP 503 service unavailable', FailureKind.SITE_ERROR),
@@ -88,3 +91,14 @@ def test_retry_policy_reads_env(monkeypatch):
 	assert policy.max_attempts == 4
 	assert policy.max_egress_rotations == 3
 	assert policy.transient_retry_delay_seconds == 1.5
+
+
+def test_rate_limit_stops_without_immediate_retry():
+	decision = decide_retry(
+		FailureKind.RATE_LIMITED,
+		attempt=1,
+		same_node_retries=0,
+		egress_rotations=0,
+		policy=RetryPolicy(),
+	)
+	assert decision.action == RetryAction.STOP

@@ -19,6 +19,7 @@ class FailureKind(str, Enum):
 	TRANSIENT_NETWORK = 'transient_network'
 	WAF_CHALLENGE = 'waf_challenge'
 	AUTH_INVALID = 'auth_invalid'
+	RATE_LIMITED = 'rate_limited'
 	SITE_ERROR = 'site_error'
 	MANUAL_REQUIRED = 'manual_required'
 	UNKNOWN = 'unknown'
@@ -90,6 +91,18 @@ _WAF_PATTERNS = (
 	r'访问受限',
 	r'access denied',
 )
+_RATE_LIMIT_PATTERNS = (
+	r'\b429\b',
+	r'too many',
+	r'rate limit',
+	r'ratelimit',
+	r'请求.*频繁',
+	r'操作.*频繁',
+	r'尝试.*次数',
+	r'请稍后',
+	r'try again later',
+	r'temporarily blocked',
+)
 _AUTH_PATTERNS = (
 	r'\b401\b',
 	r'unauthorized',
@@ -135,6 +148,8 @@ def classify_failure(message: str) -> FailureKind:
 	lower = text.lower()
 	if _matches(lower, _WAF_PATTERNS):
 		return FailureKind.WAF_CHALLENGE
+	if _matches(lower, _RATE_LIMIT_PATTERNS):
+		return FailureKind.RATE_LIMITED
 	if _matches(lower, _AUTH_PATTERNS):
 		return FailureKind.AUTH_INVALID
 	if _matches(lower, _PROXY_PATTERNS):
@@ -159,7 +174,12 @@ def decide_retry(
 	if attempt >= policy.max_attempts:
 		return RetryDecision(RetryAction.STOP, 0.0, 'attempt budget exhausted')
 
-	if kind in (FailureKind.AUTH_INVALID, FailureKind.MANUAL_REQUIRED, FailureKind.PROXY_UNAVAILABLE):
+	if kind in (
+		FailureKind.AUTH_INVALID,
+		FailureKind.RATE_LIMITED,
+		FailureKind.MANUAL_REQUIRED,
+		FailureKind.PROXY_UNAVAILABLE,
+	):
 		return RetryDecision(RetryAction.STOP, 0.0, f'{kind.value} is not retryable')
 
 	if kind == FailureKind.WAF_CHALLENGE:

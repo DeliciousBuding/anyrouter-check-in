@@ -43,8 +43,8 @@ async def test_rotator_excludes_current_node_and_enforces_budget():
 		async def current_node(self):
 			return self.current
 
-		async def rotate(self, excluded):
-			assert 'node-a' in excluded
+		async def select_stable_node(self, account_key, excluded=None):
+			assert 'node-a' in (excluded or set())
 			self.selected.append('node-b')
 			return 'node-b'
 
@@ -71,3 +71,48 @@ def test_controller_from_env(monkeypatch):
 	assert controller.api_url == 'http://127.0.0.1:9097'
 	assert controller.group == 'CHECKIN'
 	assert controller.auto_group == 'CHECKIN_AUTO'
+
+
+@pytest.mark.asyncio
+async def test_stable_node_selection_is_per_account():
+	controller = EgressController('http://127.0.0.1:9097', 'secret')
+	selected = []
+
+	async def fake_list_nodes():
+		return ['node-a', 'node-b', 'node-c']
+
+	async def fake_current_node():
+		return None
+
+	async def fake_select_node(name):
+		selected.append(name)
+
+	setattr(controller, 'list_nodes', fake_list_nodes)
+	setattr(controller, 'current_node', fake_current_node)
+	setattr(controller, 'select_node', fake_select_node)
+
+	first = await controller.select_stable_node('agentrouter:account-a')
+	second = await controller.select_stable_node('agentrouter:account-a')
+
+	assert first == second
+	assert len(selected) == 2
+
+
+@pytest.mark.asyncio
+async def test_stable_node_selection_reuses_current_node():
+	controller = EgressController('http://127.0.0.1:9097', 'secret')
+
+	async def fake_list_nodes():
+		return ['node-a', 'node-b']
+
+	async def fake_current_node():
+		return 'node-b'
+
+	async def fail_select_node(name):
+		raise AssertionError(f'selected {name} despite a usable current node')
+
+	setattr(controller, 'list_nodes', fake_list_nodes)
+	setattr(controller, 'current_node', fake_current_node)
+	setattr(controller, 'select_node', fail_select_node)
+
+	assert await controller.select_stable_node('agentrouter:account-a') == 'node-b'

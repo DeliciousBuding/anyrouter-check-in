@@ -3,6 +3,7 @@
 配置管理模块
 """
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -17,12 +18,14 @@ class ProviderConfig:
 	domain: str
 	login_path: str = '/login'
 	sign_in_path: str | None = '/api/user/sign_in'
+	check_in_status_path: str | None = None
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
 	waf_cookie_names: List[str] | None = None
 	use_proxy: bool = False
 	persist_profile: bool = False
+	daily_success_cooldown_hours: float = 0.0
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -50,17 +53,21 @@ class ProviderConfig:
 		"""
 		default_use_proxy = defaults.use_proxy if defaults else False
 		default_persist_profile = defaults.persist_profile if defaults else False
+		default_daily_cooldown = defaults.daily_success_cooldown_hours if defaults else 0.0
+		default_status_path = defaults.check_in_status_path if defaults else None
 		return cls(
 			name=name,
 			domain=data['domain'],
 			login_path=data.get('login_path', defaults.login_path if defaults else '/login'),
 			sign_in_path=data.get('sign_in_path', defaults.sign_in_path if defaults else '/api/user/sign_in'),
+			check_in_status_path=data.get('check_in_status_path', default_status_path),
 			user_info_path=data.get('user_info_path', defaults.user_info_path if defaults else '/api/user/self'),
 			api_user_key=data.get('api_user_key', defaults.api_user_key if defaults else 'new-api-user'),
 			bypass_method=data.get('bypass_method', defaults.bypass_method if defaults else None),
 			waf_cookie_names=data.get('waf_cookie_names', defaults.waf_cookie_names if defaults else None),
 			use_proxy=data.get('use_proxy', default_use_proxy),
 			persist_profile=data.get('persist_profile', default_persist_profile),
+			daily_success_cooldown_hours=float(data.get('daily_success_cooldown_hours', default_daily_cooldown) or 0.0),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -87,6 +94,7 @@ class AppConfig:
 				domain='https://anyrouter.top',
 				login_path='/login',
 				sign_in_path='/api/user/sign_in',
+				check_in_status_path='/api/user/checkin',
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
@@ -98,13 +106,14 @@ class AppConfig:
 				name='agentrouter',
 				domain='https://agentrouter.org',
 				login_path='/login',
-				sign_in_path=None,  # 无需签到接口，查询用户信息时自动完成签到
+				sign_in_path=None,  # AgentRouter 以真实登录事件触发奖励，没有签到接口
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
 				waf_cookie_names=['acw_tc'],
 				use_proxy=True,
 				persist_profile=False,
+				daily_success_cooldown_hours=24.0,
 			),
 		}
 
@@ -174,6 +183,20 @@ class AccountConfig:
 	def has_login_credentials(self) -> bool:
 		"""是否配置了邮箱密码登录"""
 		return bool(self.email and self.password)
+
+	def get_state_key(self, index: int) -> str:
+		"""返回不暴露邮箱/账号的稳定状态 key。"""
+
+		if self.email:
+			identity = f'email:{self.email.strip().lower()}'
+		elif self.api_user:
+			identity = f'api_user:{self.api_user}'
+		elif self.name:
+			identity = f'name:{self.name.strip().lower()}'
+		else:
+			identity = f'index:{index + 1}'
+		digest = hashlib.sha256(f'{self.provider}:{identity}'.encode('utf-8')).hexdigest()[:12]
+		return f'{self.provider}:{digest}'
 
 	def get_log_label(self, index: int) -> str:
 		"""日志、截图文件名、浏览器 profile 目录用的不透明别名。

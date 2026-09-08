@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from utils.browser import launch_login_context, load_browser_login_settings
+from utils.browser import launch_login_context, load_browser_login_settings, sanitize_login_message
 
 
 def test_browser_login_settings_records_profile_persistence(monkeypatch, tmp_path):
@@ -98,3 +98,38 @@ async def test_launch_login_context_closes_browser_for_ephemeral_context(monkeyp
 	assert context.closed is True
 	assert browser.closed is True
 	assert not settings.profile_dir.exists()
+
+
+def test_browser_login_settings_uses_stable_per_account_seed(monkeypatch, tmp_path):
+	monkeypatch.setenv('CHECKIN_BROWSER_PROFILE_DIR', str(tmp_path))
+
+	first = load_browser_login_settings('agentrouter-5', 'agentrouter', persist_profile=False)
+	second = load_browser_login_settings('agentrouter-5', 'agentrouter', persist_profile=False)
+	other = load_browser_login_settings('agentrouter-6', 'agentrouter', persist_profile=False)
+
+	assert first.fingerprint_seed == second.fingerprint_seed
+	assert first.fingerprint_seed != other.fingerprint_seed
+	assert first.fingerprint_seed is not None
+	assert 10000 <= first.fingerprint_seed <= 99999
+
+
+def test_login_message_redacts_identity_and_tokens():
+	fake_value = 'sk-' + ('x' * 16)
+	message = sanitize_login_message(f'user@example.com Bearer abc.def {fake_value} token=secret cookie=session-value')
+
+	assert message is not None
+	assert 'user@example.com' not in message
+	assert 'abc.def' not in message
+	assert fake_value not in message
+	assert 'secret' not in message
+	assert 'session-value' not in message
+	assert '[redacted-email]' in message
+
+
+def test_login_message_redacts_url_credentials():
+	fake_url = 'https://' + 'user' + ':' + 'password' + '@example.com:8080'
+	message = sanitize_login_message(f'proxy {fake_url} failed')
+
+	assert message is not None
+	assert ('user' + ':' + 'password') not in message
+	assert '[redacted]@example.com' in message

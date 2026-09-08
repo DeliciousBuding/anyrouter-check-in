@@ -9,7 +9,10 @@ def test_builtin_provider_profile_persistence_defaults(monkeypatch):
 	config = AppConfig.load_from_env()
 
 	assert config.providers['anyrouter'].persist_profile is True
+	assert config.providers['anyrouter'].check_in_status_path == '/api/user/checkin'
 	assert config.providers['agentrouter'].persist_profile is False
+	assert config.providers['agentrouter'].check_in_status_path is None
+	assert config.providers['agentrouter'].daily_success_cooldown_hours == 24.0
 
 
 def test_unnamed_account_fallback_includes_provider():
@@ -66,3 +69,21 @@ def test_provider_from_dict_inherits_profile_persistence_from_defaults():
 	)
 
 	assert provider.persist_profile is True
+
+
+def test_state_key_is_stable_and_does_not_expose_email():
+	account = AccountConfig(cookies=None, provider='agentrouter', email='sample@example.com', password='secret')
+
+	key = account.get_state_key(0)
+
+	assert key.startswith('agentrouter:')
+	assert 'sample@example.com' not in key
+	assert key == account.get_state_key(1)
+
+
+def test_state_key_uses_name_when_api_user_is_absent():
+	first = AccountConfig(cookies={'session': 'abc'}, provider='anyrouter', name='primary')
+	second = AccountConfig(cookies={'session': 'abc'}, provider='anyrouter', name='primary')
+
+	assert first.get_state_key(0) == second.get_state_key(7)
+	assert 'primary' not in first.get_state_key(0)
