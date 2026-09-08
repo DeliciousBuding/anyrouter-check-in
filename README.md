@@ -298,17 +298,18 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 WAF 重试与出口轮换：
 
-- mihomo 默认用 `url-test` 在主/备用订阅中自动选择健康节点。
-- 单账号优先复用当前节点；当前节点被排除或选择失败时，再按账号 hash 选择确定性备用节点，避免整轮把出口切来切去。
-- 检测到 WAF/人机验证时，不会在原节点机械重试，而是排除当前节点、切换控制组节点并重新创建浏览器上下文。
+- 初始选路交给 mihomo `url-test` 在主/备用订阅中自动选择健康节点；`CHECKIN_AUTO` 的实际节点会被解析出来，避免账号 hash 一开始就覆盖健康检查结果。
+- 正常情况下复用当前实际节点；检测到 WAF/人机验证时才排除该节点、按账号 hash 选择备用节点，并重新创建浏览器上下文。
+- 备用节点池足够大时会继续按每账号预算轮换，不会整轮共享已用节点集合。
 - 网络瞬断先在原节点重试一次，仍失败再换节点。
 - 邮箱密码错误、session 失效等认证失败不会换节点，直接告警。
 - AgentRouter 的 `use_proxy: true` 是 fail-closed：代理未就绪时跳过直连，避免用数据中心 IP 硬撞 WAF。
 
 可用环境变量：
 
-- `CHECKIN_MAX_ATTEMPTS`：单账号最大登录尝试次数，默认 `3`
-- `CHECKIN_MAX_EGRESS_ROTATIONS`：**每个账号**最多换节点次数，默认 `2`；账号之间不共享预算
+- `CHECKIN_MAX_ATTEMPTS`：单账号最大登录尝试次数，默认 `4`
+- `CHECKIN_MAX_EGRESS_ROTATIONS`：**每个账号**最多换节点次数，默认 `3`；账号之间不共享预算
+- `CHECKIN_MAX_BACKOFF_HOURS`：单次失败后的最大退避，默认 `6`；认证失败等长退避会被封顶，保证一天内至少多次尝试
 - `CHECKIN_TRANSIENT_RETRY_DELAY_SECONDS`：瞬断重试等待，默认 `5`
 - `CHECKIN_EGRESS_RETRY_DELAY_SECONDS`：换节点前等待，默认 `8`
 - `CHECKIN_STRICT=true`：任一账号失败时 workflow 返回非零；本 fork 的生产 workflow 已启用
