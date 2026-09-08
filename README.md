@@ -321,6 +321,7 @@ WAF 重试与出口轮换：
 状态持久化：
 
 - `balance_snapshot.json`、`notify_state.json` 和 `checkin_state.json` 通过 GitHub Actions cache 持久化，属于非敏感运行状态；workflow 使用显式 `cache/save + always()`，严格模式失败时也会保存。
+- `checkin_state.json` 在每个账号处理完后立即原子写入；即使后续账号异常或进程提前退出，前面已成功账号的状态也不会丢。
 - `checkin_state.json` 只记录账号 hash key、最近成功/失败时间、失败分类和最近余额；不保存邮箱、密码、cookie 或 token。
 - 同一 ref 的 workflow 使用 `concurrency` 串行执行，避免定时任务和人工 `force` 同时登录造成重复触发。
 - `.browser_profiles` 可能包含登录态，**公开仓默认不持久化**。仅私有 fork 或自建 runner 可设置仓库变量 `ENABLE_BROWSER_PROFILE_CACHE=true` 显式开启；开启后 cache key 包含 profile 内容哈希，可保存新版本。
