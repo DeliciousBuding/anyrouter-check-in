@@ -2,6 +2,7 @@
 # 通过 mihomo 拉取订阅、启动本地代理并探测可用节点。
 # 环境变量:
 #   PROXY_SUBSCRIPTION_URL  订阅链接（必填才启用）
+#   PROXY_SUBSCRIPTION_URL_FALLBACK  可选备用订阅（与主订阅使用同一节点过滤规则）
 #   PROXY_TEST_URL          探测目标，默认 https://www.google.com/generate_204
 #   PROXY_NODE_FILTER       节点名正则，把出口收窄到指定地区（不设则全订阅节点参与选路）
 #   PROXY_PROBE_URL         业务侧探测目标，用于判断该出口是否被目标站点下发人机验证
@@ -25,6 +26,7 @@ PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
 PROXY_NODE_FILTER="${PROXY_NODE_FILTER:-}"
 PROXY_PROBE_URL="${PROXY_PROBE_URL:-}"
+PROXY_SUBSCRIPTION_URL_FALLBACK="${PROXY_SUBSCRIPTION_URL_FALLBACK:-}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
 # 本地控制面只用于自检选路结果；口令每次随机生成，不来自 secret、也不落日志
@@ -58,6 +60,27 @@ else
 	echo "[WARN] PROXY_NODE_FILTER not set; egress node is whatever url-test picks fastest"
 fi
 
+FALLBACK_PROVIDER_YAML=""
+FALLBACK_USE_YAML=""
+if [[ -n "${PROXY_SUBSCRIPTION_URL_FALLBACK}" ]]; then
+	FALLBACK_PROVIDER_YAML=$(cat <<FALLBACK_EOF
+
+  subscription_fallback:
+    type: http
+    url: "${PROXY_SUBSCRIPTION_URL_FALLBACK}"
+    interval: 3600
+    path: ./subscription-fallback.yaml
+    health-check:
+      enable: true
+      interval: 60
+      url: https://www.gstatic.com/generate_204
+FALLBACK_EOF
+)
+	FALLBACK_USE_YAML="
+      - subscription_fallback"
+	echo "[INFO] Fallback subscription enabled (URL withheld)"
+fi
+
 cat > config.yaml <<EOF
 mixed-port: ${PROXY_PORT}
 allow-lan: false
@@ -78,16 +101,23 @@ proxy-providers:
       enable: true
       interval: 60
       url: https://www.gstatic.com/generate_204
+${FALLBACK_PROVIDER_YAML}
 
 proxy-groups:
-  - name: CHECKIN
+  - name: CHECKIN_AUTO
     type: url-test
     url: "${PROXY_TEST_URL}"
     interval: 60
     tolerance: 150
     lazy: false${GROUP_FILTER_YAML}
     use:
-      - subscription
+      - subscription${FALLBACK_USE_YAML}
+  - name: CHECKIN
+    type: select
+    proxies:
+      - CHECKIN_AUTO${GROUP_FILTER_YAML}
+    use:
+      - subscription${FALLBACK_USE_YAML}
 
 rules:
   - MATCH,CHECKIN
@@ -151,7 +181,7 @@ fi
 # candidates 与 filter_matched 用来判断 filter 是否真的收窄了候选集：
 # 两者相等且等于全订阅节点数即说明 filter 没生效。
 GROUP_JSON="$(curl -fsS --max-time 15 -H "Authorization: Bearer ${PROXY_API_SECRET}" \
-	"http://127.0.0.1:${PROXY_API_PORT}/proxies/CHECKIN" 2>/dev/null || true)"
+	"http://127.0.0.1:${PROXY_API_PORT}/proxies/CHECKIN_AUTO" 2>/dev/null || true)"
 if [[ -n "${GROUP_JSON}" ]]; then
 	printf '%s' "${GROUP_JSON}" | python3 -c '
 import hashlib, json, re, sys
@@ -191,5 +221,11 @@ if [[ -n "${PROXY_PROBE_URL}" ]]; then
 fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-	echo "CHECKIN_PROXY_URL=${PROXY_URL}" >> "${GITHUB_ENV}"
+	{
+		echo "CHECKIN_PROXY_URL=${PROXY_URL}"
+		echo "CHECKIN_PROXY_API_URL=http://127.0.0.1:${PROXY_API_PORT}"
+		echo "CHECKIN_PROXY_API_SECRET=${PROXY_API_SECRET}"
+		echo "CHECKIN_PROXY_GROUP=CHECKIN"
+		echo "CHECKIN_PROXY_AUTO_GROUP=CHECKIN_AUTO"
+	} >> "${GITHUB_ENV}"
 fi

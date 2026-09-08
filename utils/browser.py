@@ -9,11 +9,12 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from utils.debug import debug_print, is_debug_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
 from utils.proxy import get_playwright_proxy
+from utils.retry import FailureKind, LoginFlowError, classify_failure
 
 if TYPE_CHECKING:
 	from playwright.async_api import BrowserContext, Locator, Page
@@ -91,6 +92,22 @@ _LOGIN_SHELL_READY_JS = f"""() => {{
 	const blocked = /请进行验证|为了更好的访问体验|访问受限|Access denied|verify you are human/i.test(text);
 	if (blocked) return false;
 	return countVisible('.semi-card') > 0 || countVisible('#username') > 0 || countVisible('button') >= 2;
+}}"""
+
+_WAF_CHALLENGE_JS = f"""() => {{
+{_VISIBLE_CHECK_JS}
+	const text = document.body?.innerText || '';
+	if (/请进行验证|为了更好的访问体验|访问受限|Access denied|Access Verification|verify you are human|slide to complete|please slide|turnstile|captcha/i.test(text)) {{
+		return true;
+	}}
+	const blockers = document.querySelector(
+		'iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="slide"], .nc-container, #nocaptcha, [class*="turnstile"]'
+	);
+	if (blockers) {{
+		const rect = blockers.getBoundingClientRect?.();
+		if (rect && rect.width > 0 && rect.height > 0) return true;
+	}}
+	return false;
 }}"""
 
 _OPEN_EMAIL_FORM_JS = """() => {
@@ -229,14 +246,14 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 		from cloakbrowser import launch_persistent_context_async
 
 		settings.profile_dir.mkdir(parents=True, exist_ok=True)
-		return await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs)
+		return cast('BrowserContext', await launch_persistent_context_async(str(settings.profile_dir), **launch_kwargs))
 
 	from cloakbrowser import launch_async
 
 	context_kwargs = {'viewport': launch_kwargs.pop('viewport')}
 	browser = await launch_async(**launch_kwargs)
 	context = await browser.new_context(**context_kwargs)
-	return _EphemeralBrowserContext(context, browser)
+	return cast('BrowserContext', _EphemeralBrowserContext(context, browser))
 
 
 def get_screenshot_dir() -> Path:
@@ -299,7 +316,11 @@ async def wait_for_site_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS
 		print(f'[INFO] Dismissed {closed} popup dialog(s)')
 
 
-async def _wait_for_optional_load_state(page: Page, state: str, timeout_ms: int) -> bool:
+async def _wait_for_optional_load_state(
+	page: Page,
+	state: Literal['domcontentloaded', 'load', 'networkidle'],
+	timeout_ms: int,
+) -> bool:
 	try:
 		await page.wait_for_load_state(state, timeout=timeout_ms)
 		return True
@@ -330,12 +351,18 @@ async def navigate_login_page(
 	provider: str = '',
 	account_name: str = '',
 ) -> None:
-	"""预热站点、导航登录页并等待 SPA 渲染完成。"""
+	"""预热站点、导航登录页并等待 SPA 渲染完成。
+
+	WAF 挑战不等同于普通网络重试：检测到挑战后立即抛出带分类的异常，
+	由上层轮换出口并创建全新浏览器上下文。
+	"""
+
 	from urllib.parse import urlparse
 
 	parsed = urlparse(login_url)
 	base_url = f'{parsed.scheme}://{parsed.netloc}/'
 	attempt_timeout = min(timeout_ms, 60_000)
+	last_kind = FailureKind.TRANSIENT_NETWORK
 
 	try:
 		print(f'[INFO] Warming up {base_url} before login')
@@ -353,11 +380,15 @@ async def navigate_login_page(
 			await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
 		except Exception as exc:
 			# 代理节点中途失联会表现成导航被 chrome-error://chromewebdata/ 打断，属瞬时
-			# 故障：消耗一次重试而不是直接判死账号（2026-09-08 实跑 8 号里尾部 2 号即此
-			# 症状，同一轮前 6 号全绿）。最后一次仍失败才抛给调用方。
+			# 故障：消耗一次重试而不是直接判死账号。WAF 挑战则立即交给上层换出口。
+			if await is_waf_challenge(page):
+				raise LoginFlowError(FailureKind.WAF_CHALLENGE, 'WAF challenge during login navigation') from exc
+			last_kind = classify_failure(str(exc))
+			if last_kind == FailureKind.UNKNOWN:
+				last_kind = FailureKind.TRANSIENT_NETWORK
 			print(f'[WARN] Login navigation failed on attempt {attempt + 1}: {str(exc)[:120]}')
 			if attempt == 2:
-				raise
+				raise LoginFlowError(last_kind, f'Login navigation failed: {str(exc)[:120]}') from exc
 			await asyncio.sleep(5)
 			continue
 		await _settle_page(page, 5, 20_000)
@@ -366,6 +397,9 @@ async def navigate_login_page(
 			await wait_for_site_ready(page, timeout_ms)
 			if await page.evaluate(_LOGIN_SHELL_READY_JS):
 				return
+
+		if await is_waf_challenge(page):
+			raise LoginFlowError(FailureKind.WAF_CHALLENGE, 'WAF challenge blocked login page')
 
 		print(f'[WARN] Login page shell not ready on attempt {attempt + 1}')
 		await _log_login_page_state(page)
@@ -378,7 +412,7 @@ async def navigate_login_page(
 			except Exception:  # nosec B110
 				pass
 
-	raise TimeoutError(f'Login page never rendered: {login_url}')
+	raise LoginFlowError(last_kind, f'Login page never rendered: {login_url}')
 
 
 async def has_session_cookie(page: Page) -> bool:
@@ -492,6 +526,15 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 
 async def wait_for_waf_ready(page: Page, timeout_ms: int = WAF_READY_TIMEOUT_MS) -> None:
 	await wait_for_site_ready(page, timeout_ms)
+
+
+async def is_waf_challenge(page: Page) -> bool:
+	"""判断当前页面是否仍停留在 WAF/人机验证页。"""
+
+	try:
+		return bool(await page.evaluate(_WAF_CHALLENGE_JS))
+	except Exception:  # nosec B110
+		return False
 
 
 async def _first_visible_locator(page: Page, selectors: tuple[str, ...]) -> Locator | None:
