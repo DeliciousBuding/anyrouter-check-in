@@ -221,6 +221,8 @@ if [[ -n "${PROXY_PROBE_URL}" ]]; then
 fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
+	# Runner debug 日志会回显 step 环境；生成的本地控制面口令必须先注册掩码。
+	echo "::add-mask::${PROXY_API_SECRET}"
 	{
 		echo "CHECKIN_PROXY_URL=${PROXY_URL}"
 		echo "CHECKIN_PROXY_API_URL=http://127.0.0.1:${PROXY_API_PORT}"
