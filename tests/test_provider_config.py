@@ -12,7 +12,8 @@ def test_builtin_provider_profile_persistence_defaults(monkeypatch):
 	assert config.providers['anyrouter'].check_in_status_path == '/api/user/checkin'
 	assert config.providers['agentrouter'].persist_profile is False
 	assert config.providers['agentrouter'].check_in_status_path is None
-	assert config.providers['agentrouter'].daily_success_cooldown_hours == 24.0
+	assert config.providers['agentrouter'].daily_success_cooldown_hours == 6.0
+	assert config.providers['agentrouter'].daily_success_timezone == 'UTC'
 
 
 def test_unnamed_account_fallback_includes_provider():

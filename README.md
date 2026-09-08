@@ -241,6 +241,8 @@
   - `"waf_cookies"`：使用 CloakBrowser 打开浏览器获取 WAF cookies 后再执行签到
   - 不设置或 `null`：直接使用用户 cookies 执行签到（适合无 WAF 保护的网站）
 - `waf_cookie_names` (可选)：绕过 WAF 所需 cookie 的名称列表，`bypass_method` 为 `waf_cookies` 时必须设置
+- `daily_success_cooldown_hours` (可选)：同一站点日历日成功后，跨日重试的最短间隔，默认 `0`
+- `daily_success_timezone` (可选)：站点日判断时区，默认 `UTC`
 
 **配置示例**（完整）：
 
@@ -267,7 +269,7 @@
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
   - `sign_in_path: null`（**登录事件本身即签到**，没有通用签到接口）
   - `use_proxy: true`
-  - `daily_success_cooldown_hours: 24`（成功登录后 24 小时内不重复登录，`workflow_dispatch` 可用 `force=true` 绕过）
+  - `daily_success_cooldown_hours: 6` + `daily_success_timezone: UTC`（同一 UTC 日历日只成功登录一次，跨日重试至少间隔 6h；`workflow_dispatch` 可用 `force=true` 绕过）
   - `system_access_token` **不能替代真实登录触发签到**；本脚本只使用邮箱密码或 session cookies。若只需查余额，可另行用该 token 调用 `/api/user/self`
 
 **重要提示**：

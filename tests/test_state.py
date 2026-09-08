@@ -54,3 +54,58 @@ def test_last_balance_keeps_bonus_when_quota_fields_are_absent(tmp_path):
 	store.mark_success('anyrouter:abc', bonus=1.5)
 
 	assert store.last_balance('anyrouter:abc') == {'quota': 0.0, 'used': 0.0, 'bonus': 1.5}
+
+
+def test_daily_success_gate_uses_site_calendar_day(tmp_path):
+	last_success = datetime(2026, 9, 8, 15, 0, tzinfo=timezone.utc)  # 23:00 HKT
+	store = CheckinStateStore.load(tmp_path / 'state.json')
+	store.mark_success('agentrouter:abc', now=last_success)
+
+	assert store.successful_today(
+		'agentrouter:abc',
+		timezone_name='UTC',
+		now=last_success + timedelta(hours=7),
+	)
+	assert not store.successful_today(
+		'agentrouter:abc',
+		timezone_name='UTC',
+		now=last_success + timedelta(hours=13),
+	)
+
+
+def test_daily_success_allows_next_site_day_but_keeps_min_interval(tmp_path):
+	last_success = datetime(2026, 9, 8, 23, 30, tzinfo=timezone.utc)
+	store = CheckinStateStore.load(tmp_path / 'state.json')
+	store.mark_success('agentrouter:abc', now=last_success)
+
+	assert store.skip_reason(
+		'agentrouter:abc',
+		daily_success_cooldown_hours=6,
+		daily_success_timezone='UTC',
+		now=last_success + timedelta(hours=1.5),
+	)
+	assert (
+		store.skip_reason(
+			'agentrouter:abc',
+			daily_success_cooldown_hours=6,
+			daily_success_timezone='UTC',
+			now=last_success + timedelta(hours=6),
+		)
+		is None
+	)
+
+
+def test_zero_daily_cooldown_does_not_block_same_day_status_checks(tmp_path):
+	now = datetime(2026, 9, 9, 1, 0, tzinfo=timezone.utc)
+	store = CheckinStateStore.load(tmp_path / 'state.json')
+	store.mark_success('anyrouter:abc', now=now)
+
+	assert (
+		store.skip_reason(
+			'anyrouter:abc',
+			daily_success_cooldown_hours=0,
+			daily_success_timezone='UTC',
+			now=now + timedelta(hours=1),
+		)
+		is None
+	)

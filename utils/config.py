@@ -26,6 +26,7 @@ class ProviderConfig:
 	use_proxy: bool = False
 	persist_profile: bool = False
 	daily_success_cooldown_hours: float = 0.0
+	daily_success_timezone: str = 'UTC'
 
 	def __post_init__(self):
 		required_waf_cookies = set()
@@ -54,6 +55,7 @@ class ProviderConfig:
 		default_use_proxy = defaults.use_proxy if defaults else False
 		default_persist_profile = defaults.persist_profile if defaults else False
 		default_daily_cooldown = defaults.daily_success_cooldown_hours if defaults else 0.0
+		default_daily_timezone = defaults.daily_success_timezone if defaults else 'UTC'
 		default_status_path = defaults.check_in_status_path if defaults else None
 		return cls(
 			name=name,
@@ -68,6 +70,7 @@ class ProviderConfig:
 			use_proxy=data.get('use_proxy', default_use_proxy),
 			persist_profile=data.get('persist_profile', default_persist_profile),
 			daily_success_cooldown_hours=float(data.get('daily_success_cooldown_hours', default_daily_cooldown) or 0.0),
+			daily_success_timezone=str(data.get('daily_success_timezone', default_daily_timezone) or 'UTC'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -113,7 +116,8 @@ class AppConfig:
 				waf_cookie_names=['acw_tc'],
 				use_proxy=True,
 				persist_profile=False,
-				daily_success_cooldown_hours=24.0,
+				daily_success_cooldown_hours=6.0,
+				daily_success_timezone='UTC',
 			),
 		}
 
