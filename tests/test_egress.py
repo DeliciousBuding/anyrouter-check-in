@@ -116,3 +116,19 @@ async def test_stable_node_selection_reuses_current_node():
 	setattr(controller, 'select_node', fail_select_node)
 
 	assert await controller.select_stable_node('agentrouter:account-a') == 'node-b'
+
+
+@pytest.mark.asyncio
+async def test_current_node_resolves_auto_group_member():
+	controller = EgressController('http://127.0.0.1:9097', 'secret')
+
+	async def fake_request(method, path, *, payload=None):
+		if path == '/proxies/CHECKIN':
+			return {'all': ['CHECKIN_AUTO', 'node-a', 'node-b'], 'now': 'CHECKIN_AUTO'}
+		if path == '/proxies/CHECKIN_AUTO':
+			return {'all': ['node-a', 'node-b'], 'now': 'node-b'}
+		raise AssertionError(path)
+
+	setattr(controller, '_request', fake_request)
+
+	assert await controller.current_node() == 'node-b'

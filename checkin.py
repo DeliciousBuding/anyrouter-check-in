@@ -65,10 +65,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
 	return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
-def _failure_retry_hours(kind: FailureKind) -> float:
-	"""失败后多久允许该账号再次尝试。认证失败不参与当轮重试。"""
+def _max_backoff_hours() -> float:
+	"""失败退避上限；默认 6h，保证一天内至少多次尝试。"""
 
-	return {
+	raw = os.getenv('CHECKIN_MAX_BACKOFF_HOURS', '6')
+	try:
+		value = float(raw)
+	except (TypeError, ValueError):
+		value = 6.0
+	return value if value > 0 else 6.0
+
+
+def _failure_retry_hours(kind: FailureKind) -> float:
+	"""失败后多久允许该账号再次尝试；长退避会被上限封顶。"""
+
+	base = {
 		FailureKind.AUTH_INVALID: 24.0,
 		FailureKind.RATE_LIMITED: 6.0,
 		FailureKind.WAF_CHALLENGE: 2.0,
@@ -77,6 +88,7 @@ def _failure_retry_hours(kind: FailureKind) -> float:
 		FailureKind.PROXY_UNAVAILABLE: 1.0,
 		FailureKind.MANUAL_REQUIRED: 24.0,
 	}.get(kind, 6.0)
+	return min(base, _max_backoff_hours())
 
 
 def _quota_to_usd(value: object) -> float:

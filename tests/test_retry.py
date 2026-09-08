@@ -102,3 +102,10 @@ def test_rate_limit_stops_without_immediate_retry():
 		policy=RetryPolicy(),
 	)
 	assert decision.action == RetryAction.STOP
+
+
+def test_default_policy_uses_more_nodes_for_recovery():
+	policy = RetryPolicy()
+
+	assert policy.max_attempts == 4
+	assert policy.max_egress_rotations == 3

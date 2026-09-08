@@ -55,8 +55,8 @@ class RetryDecision:
 class RetryPolicy:
 	"""单账号重试预算。"""
 
-	max_attempts: int = 3
-	max_egress_rotations: int = 2
+	max_attempts: int = 4
+	max_egress_rotations: int = 3
 	transient_retry_delay_seconds: float = 5.0
 	egress_retry_delay_seconds: float = 8.0
 

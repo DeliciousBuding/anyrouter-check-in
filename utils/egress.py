@@ -76,12 +76,23 @@ class EgressController:
 		]
 
 	async def current_node(self) -> str | None:
+		"""返回控制组实际使用的节点；若当前是 AUTO 组则解析到内部节点。
+
+		初始选路交给 mihomo url-test，避免账号 hash 直接覆盖健康检查结果。
+		只有 WAF 等失败后，调用方才显式选择别的节点。
+		"""
+
 		try:
 			data = await self._request('GET', f'/proxies/{self.group}')
+			now = data.get('now')
+			if now == self.auto_group:
+				auto_data = await self._request('GET', f'/proxies/{self.auto_group}')
+				auto_now = auto_data.get('now')
+				if auto_now:
+					return str(auto_now)
+			return str(now) if now else None
 		except Exception:  # nosec B110
 			return None
-		now = data.get('now')
-		return str(now) if now else None
 
 	async def select_node(self, name: str) -> None:
 		await self._request('PUT', f'/proxies/{self.group}', payload={'name': name})
