@@ -143,6 +143,10 @@ _OPEN_EMAIL_FORM_JS = """() => {
 class BrowserLoginResult:
 	cookies: dict[str, str]
 	api_user: str | None = None
+	# 登录校验时在同一浏览器会话里拦截到的 /api/user/self。无签到端点的站点
+	# （agentrouter）登录本身就是签到动作，直接用这份 profile 当签到后余额，
+	# 省掉第二次过 WAF 的浏览器上下文——数据中心 IP 上那一步失败率很高。
+	profile: dict | None = None
 
 
 @dataclass(frozen=True)

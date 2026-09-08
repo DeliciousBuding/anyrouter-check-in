@@ -226,7 +226,7 @@ async def login_with_credentials(
 			success_msg += f', api_user={api_user}'
 		print(success_msg)
 		await context.close()
-		return BrowserLoginResult(cookies=all_cookies, api_user=api_user)
+		return BrowserLoginResult(cookies=all_cookies, api_user=api_user, profile=user_profile)
 
 	except Exception as e:
 		print(f'[FAILED] {account_name}: Error during login: {e}')
@@ -385,6 +385,13 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 			all_cookies = login_result.cookies
 			resolved_api_user = login_result.api_user
 			auth_method = 'email/password'
+			if not provider_config.needs_manual_check_in() and login_result.profile:
+				# 无签到端点的站点（agentrouter）：真实登录本身就是签到动作，余额已在
+				# 登录校验的同一会话里拿到。再开一个浏览器上下文重新过 WAF，只会在数据
+				# 中心 IP 上多一次失败机会（08-21 实测那条路连续 8 次拿不到 JSON）。
+				print(f'[AUTH] {account_name}: Using auth method -> email/password (login-triggered check-in)')
+				print(f'[SUCCESS] {account_name}: Check-in completed by fresh login (user info verified)')
+				return True, None, format_user_info_from_profile(login_result.profile), None
 		else:
 			message = 'email/password 登录失败（未使用过期会话）'
 			print(f'[FAILED] {account_name}: {message}')
@@ -413,7 +420,9 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	# 查询触发。数据中心 IP 的 httpx 会被 WAF 硬拦，必须走真实浏览器上下文。
 	if provider_config.sign_in_path is None and provider_config.needs_waf_cookies():
 		print(f'[AUTH] {account_name}: Routing check-in through browser context')
-		return await check_in_via_browser(account, account_name, provider_config, all_cookies)
+		return await check_in_via_browser(
+			account, account_name, provider_config, all_cookies, api_user_override=resolved_api_user
+		)
 
 	return run_check_in_requests(
 		all_cookies,
@@ -430,6 +439,8 @@ async def check_in_via_browser(
 	account_name: str,
 	provider_config,
 	all_cookies: dict,
+	*,
+	api_user_override: str | None = None,
 ) -> tuple[bool, dict | None, dict | None, str | None]:
 	"""浏览器上下文内触发签到。
 
@@ -438,12 +449,16 @@ async def check_in_via_browser(
 	签到 = 登录查询）。fetch() 不会执行 WAF 挑战页 JS，因此改用文档导航：挑战页
 	JS 自解后 reload，最终页面正文即 JSON 用户信息。数据中心 IP 的 httpx 会被
 	WAF 硬拦，必须走真实浏览器。
+
+	api_user_override 用于邮箱密码登录的账号：配置里没有 api_user，登录时才拦截到，
+	缺失会让多用户 NewAPI 返回「未提供 New-Api-User」。
 	"""
 	settings = load_browser_login_settings(
 		account_name,
 		account.provider,
 		persist_profile=provider_config.persist_profile,
 	)
+	effective_api_user = api_user_override or account.api_user
 	context = None
 	try:
 		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
@@ -468,13 +483,13 @@ async def check_in_via_browser(
 		await wait_for_waf_ready(page)
 
 		profile = await request_user_self_via_document_navigation(
-			page, account, account_name, provider_config
+			page, account, account_name, provider_config, api_user_override=effective_api_user
 		)
 
 		# 兜底：页面内 fetch（正常情况下文档导航已拿到 profile）
 		if not profile:
 			for attempt in range(3):
-				profile = await fetch_user_self_in_browser(page, account.api_user, account_name)
+				profile = await fetch_user_self_in_browser(page, effective_api_user, account_name)
 				if profile is not None:
 					break
 				# WAF 可能对 API 路径再触发一次挑战：等待解决后重试
@@ -493,10 +508,9 @@ async def check_in_via_browser(
 		print(f'[FAILED] {account_name}: Browser check-in error - {message}')
 		return False, None, None, message
 	finally:
+		# finally 里不得 return：会覆盖 try/except 的返回值，把成功判成失败。
 		if context is not None:
 			await context.close()
-		print(f'[FAILED] {account_name}: Browser check-in error - {message}')
-		return False, None, None, message
 
 
 async def request_user_self_via_document_navigation(
@@ -504,6 +518,8 @@ async def request_user_self_via_document_navigation(
 	account: AccountConfig,
 	account_name: str,
 	provider_config,
+	*,
+	api_user_override: str | None = None,
 ) -> dict | None:
 	"""文档导航到 /api/user/self 并解析正文 JSON。
 
@@ -511,7 +527,7 @@ async def request_user_self_via_document_navigation(
 	执行自解 JS 并 reload（挑战自解时 route 拦截依然生效，头不丢），最终页面
 	正文就是 /api/user/self 的 JSON 响应。
 	"""
-	api_user = (account.api_user or '').strip()
+	api_user = (api_user_override or account.api_user or '').strip()
 	api_url = f'{provider_config.domain}{provider_config.user_info_path}'
 
 	async def attach_user_header(route):
