@@ -367,6 +367,14 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
 
+	if provider_config.use_proxy and not get_proxy_server(use_proxy=True):
+		# 该 provider 必须走代理：数据中心 IP 会被下发滑块人机验证，登录页根本不渲染。
+		# 代理没起来时直连只会烧掉 3 轮登录重试，还会把失败原因误报成「站点拦截」
+		# 而不是「代理未就绪」——两者处置方式完全不同，必须区分开。
+		message = '代理未就绪（CHECKIN_PROXY_URL 为空），已跳过直连尝试'
+		print(f'[FAILED] {account_name}: {message}')
+		return False, None, None, message
+
 	# 邮箱密码优先
 	all_cookies = None
 	resolved_api_user: str | None = None

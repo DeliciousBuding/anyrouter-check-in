@@ -91,7 +91,11 @@ jobs:
     - name: 配置代理
       env:
         PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+        # 出口地区收窄规则也走 secret：公开仓里不写明我们从哪个地区出去
+        PROXY_NODE_FILTER: ${{ secrets.PROXY_NODE_FILTER }}
         PROXY_TEST_URL: https://www.google.com/generate_204
+        # 业务侧探测：这个出口对 agentrouter 是否干净（有没有被下发人机验证页）
+        PROXY_PROBE_URL: https://agentrouter.org/api/status
         MIHOMO_VERSION: v1.19.27
         PROXY_REQUIRED: false
       run: bash scripts/setup_mihomo_proxy.sh
