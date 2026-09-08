@@ -206,6 +206,7 @@
     "domain": "https://custom.example.com",
     "login_path": "/auth/login",
     "sign_in_path": "/api/checkin",
+    "check_in_status_path": "/api/user/checkin",
     "user_info_path": "/api/profile",
     "api_user_key": "New-Api-User",
     "bypass_method": "waf_cookies",
@@ -232,7 +233,8 @@
 
 - `domain` (必需)：服务商的域名
 - `login_path` (可选)：登录页面路径，默认为 `/login`（仅在 `bypass_method` 为 `"waf_cookies"` 时使用）
-- `sign_in_path` (可选)：签到 API 路径，默认为 `/api/user/sign_in`
+- `sign_in_path` (可选)：签到 API 路径，默认为 `/api/user/sign_in`；设为 `null` 表示该站没有签到接口，登录事件本身完成签到
+- `check_in_status_path` (可选)：签到状态查询路径；设置后先查今日状态，已签到则跳过写请求
 - `user_info_path` (可选)：用户信息 API 路径，默认为 `/api/user/self`
 - `api_user_key` (可选)：API 用户标识请求头名称，默认为 `new-api-user`
 - `bypass_method` (可选)：WAF 绕过方法
@@ -260,10 +262,13 @@
 - `anyrouter`：
   - `bypass_method: "waf_cookies"`（需要先获取 WAF cookies，然后执行签到）
   - `sign_in_path: "/api/user/sign_in"`
+  - `check_in_status_path: "/api/user/checkin"`（先查状态，已签到则不再写请求）
 - `agentrouter`：
   - `bypass_method: "waf_cookies"`（需要获取 `acw_tc`）
-  - `sign_in_path: null`（查询用户信息时自动签到）
+  - `sign_in_path: null`（**登录事件本身即签到**，没有通用签到接口）
   - `use_proxy: true`
+  - `daily_success_cooldown_hours: 24`（成功登录后 24 小时内不重复登录，`workflow_dispatch` 可用 `force=true` 绕过）
+  - `system_access_token` **不能替代真实登录触发签到**；本脚本只使用邮箱密码或 session cookies。若只需查余额，可另行用该 token 调用 `/api/user/self`
 
 **重要提示**：
 
@@ -294,7 +299,8 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 WAF 重试与出口轮换：
 
 - mihomo 默认用 `url-test` 在主/备用订阅中自动选择健康节点。
-- 检测到 WAF/人机验证时，不会在原节点机械重试，而是切换控制组节点并重新创建浏览器上下文。
+- 单账号优先复用当前节点；当前节点被排除或选择失败时，再按账号 hash 选择确定性备用节点，避免整轮把出口切来切去。
+- 检测到 WAF/人机验证时，不会在原节点机械重试，而是排除当前节点、切换控制组节点并重新创建浏览器上下文。
 - 网络瞬断先在原节点重试一次，仍失败再换节点。
 - 邮箱密码错误、session 失效等认证失败不会换节点，直接告警。
 - AgentRouter 的 `use_proxy: true` 是 fail-closed：代理未就绪时跳过直连，避免用数据中心 IP 硬撞 WAF。
@@ -302,14 +308,18 @@ WAF 重试与出口轮换：
 可用环境变量：
 
 - `CHECKIN_MAX_ATTEMPTS`：单账号最大登录尝试次数，默认 `3`
-- `CHECKIN_MAX_EGRESS_ROTATIONS`：整轮最多换节点次数，默认 `2`
+- `CHECKIN_MAX_EGRESS_ROTATIONS`：**每个账号**最多换节点次数，默认 `2`；账号之间不共享预算
 - `CHECKIN_TRANSIENT_RETRY_DELAY_SECONDS`：瞬断重试等待，默认 `5`
 - `CHECKIN_EGRESS_RETRY_DELAY_SECONDS`：换节点前等待，默认 `8`
 - `CHECKIN_STRICT=true`：任一账号失败时 workflow 返回非零；本 fork 的生产 workflow 已启用
+- `CHECKIN_FORCE=true`：绕过 AgentRouter 每日成功登录门禁和失败退避；只用于人工排查
+- `CHECKIN_BROWSER_TIMEZONE` / `CHECKIN_BROWSER_LOCALE`：可选，固定浏览器时区和 locale；CloakBrowser 默认每次随机指纹，本 fork 会为每个账号生成稳定 fingerprint seed
 
 状态持久化：
 
-- `balance_snapshot.json` 和 `notify_state.json` 通过 GitHub Actions cache 持久化，属于非敏感运行状态。
+- `balance_snapshot.json`、`notify_state.json` 和 `checkin_state.json` 通过 GitHub Actions cache 持久化，属于非敏感运行状态。
+- `checkin_state.json` 只记录账号 hash key、最近成功/失败时间、失败分类和最近余额；不保存邮箱、密码、cookie 或 token。
+- 同一 ref 的 workflow 使用 `concurrency` 串行执行，避免定时任务和人工 `force` 同时登录造成重复触发。
 - `.browser_profiles` 可能包含登录态，**公开仓默认不持久化**。仅私有 fork 或自建 runner 可设置仓库变量 `ENABLE_BROWSER_PROFILE_CACHE=true` 显式开启；开启后 cache key 包含 profile 内容哈希，可保存新版本。
 - 账号、密码、cookie、订阅 URL 只来自 GitHub Secrets，不写入仓库或公开日志。
 

@@ -4,7 +4,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from checkin import generate_balance_hash
+from checkin import _user_info_from_data, generate_balance_hash
 
 
 def test_balance_hash_changes_when_quota_changes():
@@ -32,3 +32,26 @@ def test_balance_hash_is_stable_for_equivalent_balances():
 	}
 
 	assert generate_balance_hash(left) == generate_balance_hash(right)
+
+
+def test_balance_hash_changes_when_bonus_changes():
+	before = {'account_1': {'quota': 100.0, 'used': 20.0, 'bonus': 0.0}}
+	after = {'account_1': {'quota': 100.0, 'used': 20.0, 'bonus': 1.0}}
+
+	assert generate_balance_hash(before) != generate_balance_hash(after)
+
+
+def test_zero_bonus_keeps_legacy_balance_hash_compatible():
+	legacy = {'account_1': {'quota': 100.0, 'used': 20.0}}
+	with_zero_bonus = {'account_1': {'quota': 100.0, 'used': 20.0, 'bonus': 0.0}}
+
+	assert generate_balance_hash(legacy) == generate_balance_hash(with_zero_bonus)
+
+
+def test_user_info_includes_optional_bonus_quota():
+	info = _user_info_from_data({'quota': 500000, 'used_quota': 100000, 'bonus_quota': 250000})
+
+	assert info['quota'] == 1.0
+	assert info['used_quota'] == 0.2
+	assert info['bonus_quota'] == 0.5
+	assert 'Bonus: $0.5' in info['display']

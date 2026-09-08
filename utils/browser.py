@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import time
@@ -167,6 +168,15 @@ class BrowserLoginResult:
 
 
 @dataclass(frozen=True)
+class LoginFormResult:
+	"""登录表单提交后从 API 响应中提取的安全诊断信息。"""
+
+	api_status: int | None = None
+	api_success: bool | None = None
+	api_message: str | None = None
+
+
+@dataclass(frozen=True)
 class BrowserLoginSettings:
 	headless: bool
 	humanize: bool
@@ -174,6 +184,9 @@ class BrowserLoginSettings:
 	profile_dir: Path
 	cloakbrowser_binary_path: str | None
 	persist_profile: bool
+	fingerprint_seed: int | None = None
+	timezone: str | None = None
+	locale: str | None = None
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -191,6 +204,17 @@ def load_browser_login_settings(
 	humanize = _env_bool('CHECKIN_HUMANIZE', True)
 	if provider == 'agentrouter':
 		humanize = _env_bool('CHECKIN_HUMANIZE_AGENTROUTER', humanize)
+	seed_material = f'{provider}:{account_name}'.encode('utf-8')
+	fingerprint_seed = 10000 + int(hashlib.sha256(seed_material).hexdigest()[:8], 16) % 90000
+	provider_prefix = f'CHECKIN_{provider.upper()}'
+	timezone = (
+		os.getenv(f'{provider_prefix}_TIMEZONE', '').strip()
+		or os.getenv('CHECKIN_BROWSER_TIMEZONE', '').strip()
+		or None
+	)
+	locale = (
+		os.getenv(f'{provider_prefix}_LOCALE', '').strip() or os.getenv('CHECKIN_BROWSER_LOCALE', '').strip() or None
+	)
 	return BrowserLoginSettings(
 		headless=_env_bool('CHECKIN_HEADLESS', True),
 		humanize=humanize,
@@ -198,6 +222,9 @@ def load_browser_login_settings(
 		profile_dir=profile_dir,
 		cloakbrowser_binary_path=os.getenv('CLOAKBROWSER_BINARY_PATH', '').strip() or None,
 		persist_profile=persist_profile,
+		fingerprint_seed=fingerprint_seed,
+		timezone=timezone,
+		locale=locale,
 	)
 
 
@@ -231,14 +258,22 @@ async def launch_login_context(settings: BrowserLoginSettings, *, use_proxy: boo
 	}
 	if settings.humanize:
 		launch_kwargs['human_preset'] = 'careful'
+	if settings.fingerprint_seed is not None:
+		# CloakBrowser 默认每次随机 seed；账号级固定 seed 可避免跨 run 指纹漂移。
+		launch_kwargs['args'] = [
+			f'--fingerprint={settings.fingerprint_seed}',
+			'--fingerprint-platform=windows',
+		]
+	if settings.timezone:
+		launch_kwargs['timezone'] = settings.timezone
+	if settings.locale:
+		launch_kwargs['locale'] = settings.locale
 
 	proxy = get_playwright_proxy(use_proxy=use_proxy)
 	if proxy:
 		launch_kwargs['proxy'] = proxy
-		if is_debug_enabled():
-			print(f'[INFO] Browser proxy enabled: {proxy["server"]}')
-		else:
-			print('[INFO] Browser proxy enabled')
+		# 代理 URL 可能内嵌账号密码；公开日志只报告启用状态。
+		print('[INFO] Browser proxy enabled')
 	elif use_proxy:
 		print('[WARN] Provider requires proxy but CHECKIN_PROXY_URL is not set')
 
@@ -325,7 +360,10 @@ async def _wait_for_optional_load_state(
 		await page.wait_for_load_state(state, timeout=timeout_ms)
 		return True
 	except Exception as exc:  # nosec B110
-		debug_print(f'[INFO] Optional load state "{state}" not reached within {timeout_ms}ms: {exc}')
+		debug_print(
+			f'[INFO] Optional load state "{state}" not reached within {timeout_ms}ms: '
+			f'{sanitize_login_message(exc) or "unknown error"}'
+		)
 		return False
 
 
@@ -372,7 +410,7 @@ async def navigate_login_page(
 		if closed:
 			print(f'[INFO] Dismissed {closed} popup dialog(s) during warmup')
 	except Exception as exc:
-		print(f'[WARN] Warmup navigation failed: {exc}')
+		print(f'[WARN] Warmup navigation failed: {sanitize_login_message(exc) or "unknown error"}')
 
 	for attempt in range(3):
 		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
@@ -386,7 +424,10 @@ async def navigate_login_page(
 			last_kind = classify_failure(str(exc))
 			if last_kind == FailureKind.UNKNOWN:
 				last_kind = FailureKind.TRANSIENT_NETWORK
-			print(f'[WARN] Login navigation failed on attempt {attempt + 1}: {str(exc)[:120]}')
+			print(
+				f'[WARN] Login navigation failed on attempt {attempt + 1}: '
+				f'{sanitize_login_message(exc) or "unknown error"}'
+			)
 			if attempt == 2:
 				raise LoginFlowError(last_kind, f'Login navigation failed: {str(exc)[:120]}') from exc
 			await asyncio.sleep(5)
@@ -508,18 +549,14 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		page.remove_listener('response', on_response)
 
 	if captured_profile:
-		if is_debug_enabled():
-			user_id = captured_profile.get('id')
-			username = captured_profile.get('username', '')
-			print(f'[INFO] Login verified via {USER_SELF_API_SUFFIX}: id={user_id}, username={username}')
-		else:
-			print('[INFO] Login verified')
+		# 公开仓 debug 日志也不打印 id/username；只保留链路是否验证成功。
+		print('[INFO] Login verified')
 		return captured_profile
 
 	if CONSOLE_PATH in page.url.lower():
 		print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no user profile')
 	else:
-		debug_print(f'[WARN] Login verification failed: current URL={page.url}')
+		debug_print(f'[WARN] Login verification failed: current URL={sanitize_login_message(page.url)}')
 		print('[WARN] Login verification failed')
 	return None
 
@@ -723,7 +760,7 @@ async def _open_email_login_form(
 	if remaining_ms > 0 and await _wait_for_username_input(page, remaining_ms):
 		return
 
-	debug_print(f'[INFO] Login page URL: {page.url}')
+	debug_print(f'[INFO] Login page URL: {sanitize_login_message(page.url)}')
 	await _log_login_page_state(page)
 	if provider and account_name:
 		await save_login_screenshot(page, provider, account_name, 'email-form-timeout')
@@ -794,7 +831,28 @@ async def fill_email_credentials(page: Page, email: str, password: str, timeout_
 	await _set_input_value(password_input, password, action_timeout)
 
 
-async def submit_login_form(page: Page, timeout_ms: int) -> None:
+def sanitize_login_message(message: object) -> str | None:
+	"""删除错误文案中的身份、token、cookie 和带凭据 URL。"""
+
+	if message is None:
+		return None
+	text = str(message).strip()
+	if not text:
+		return None
+	text = re.sub(r'(?i)\b(cookie|set-cookie)\s*:\s*[^\n]+', r'\1: [redacted]', text)
+	text = re.sub(r'(?i)bearer\s+\S+', 'Bearer [redacted]', text)
+	text = re.sub(
+		r'(?i)\b(access_token|token|session|cookie|set-cookie|api[_-]?key|authorization)\s*[=:]\s*([^\s&,;]+)',
+		r'\1=[redacted]',
+		text,
+	)
+	text = re.sub(r'(https?://)[^/@\s]+@', r'\1[redacted]@', text)
+	text = re.sub(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', '[redacted-email]', text)
+	text = re.sub(r'sk-[A-Za-z0-9_-]{8,}', '[redacted-token]', text)
+	return text[:240]
+
+
+async def submit_login_form(page: Page, timeout_ms: int) -> LoginFormResult:
 	action_timeout = min(timeout_ms, FORM_ACTION_TIMEOUT_MS)
 	submit = await _first_visible_locator(page, SUBMIT_SELECTORS)
 	if not submit:
@@ -808,13 +866,45 @@ async def submit_login_form(page: Page, timeout_ms: int) -> None:
 				continue
 	if not submit:
 		raise TimeoutError(f'Cannot find submit button: {SUBMIT_SELECTORS}')
+
+	result = LoginFormResult()
 	try:
-		await submit.click(timeout=action_timeout)
-	except Exception:
-		await submit.click(force=True, timeout=action_timeout)
+		async with page.expect_response(
+			lambda response: '/api/user/login' in response.url,
+			timeout=action_timeout,
+		) as response_info:
+			try:
+				await submit.click(timeout=action_timeout)
+			except Exception:
+				await submit.click(force=True, timeout=action_timeout)
+		response = await response_info.value
+		payload: object = {}
+		try:
+			payload = await response.json()
+		except Exception:  # nosec B110
+			pass
+		if isinstance(payload, dict):
+			success = payload.get('success')
+			if not isinstance(success, bool) and 'code' in payload:
+				success = payload.get('code') in (0, '0', True)
+			result = LoginFormResult(
+				api_status=response.status,
+				api_success=success if isinstance(success, bool) else None,
+				api_message=sanitize_login_message(payload.get('message') or payload.get('msg')),
+			)
+	except Exception:  # nosec B110
+		# 没有捕获到 JSON API 响应时保留原流程，由 /console 校验兜底。
+		pass
+
+	# API 已明确返回 4xx/5xx 或 success=false 时不要继续等 45 秒登录态；
+	# 上层会按状态码/文案快速分类，避免把限流或密码错误误报成 WAF。
+	if (result.api_status is not None and result.api_status != 200) or result.api_success is False:
+		return result
+
 	await _wait_for_optional_load_state(page, 'domcontentloaded', action_timeout)
 	await _wait_for_optional_load_state(page, 'networkidle', min(timeout_ms, 30_000))
 	await wait_for_logged_in(page, SESSION_WAIT_TIMEOUT_MS)
+	return result
 
 
 async def login_with_email_form(
@@ -825,7 +915,7 @@ async def login_with_email_form(
 	*,
 	provider: str = '',
 	account_name: str = '',
-) -> None:
+) -> LoginFormResult:
 	await _open_email_login_form(
 		page,
 		timeout_ms,
@@ -833,4 +923,4 @@ async def login_with_email_form(
 		account_name=account_name,
 	)
 	await fill_email_credentials(page, email, password, timeout_ms)
-	await submit_login_form(page, timeout_ms)
+	return await submit_login_form(page, timeout_ms)

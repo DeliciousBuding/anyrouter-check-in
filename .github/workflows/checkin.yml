@@ -9,10 +9,20 @@ on:
         required: false
         default: false
         type: boolean
+      force:
+        description: 忽略每日登录门禁，强制执行本次签到
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: checkin-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: production
     env:
       PYTHONIOENCODING: utf-8
@@ -80,6 +90,15 @@ jobs:
         key: notify-state-${{ github.ref_name }}-${{ github.run_id }}
         restore-keys: notify-state-
 
+    - name: 恢复签到状态
+      uses: actions/cache@v5
+      with:
+        path: checkin_state.json
+        key: checkin-state-${{ github.ref_name }}-${{ github.run_id }}
+        restore-keys: |
+          checkin-state-${{ github.ref_name }}-
+          checkin-state-
+
     - name: 恢复浏览器 Profile
       # 浏览器 profile 可能含登录态；公开仓默认不持久化，私有 fork 可显式打开。
       if: vars.ENABLE_BROWSER_PROFILE_CACHE == 'true'
@@ -112,6 +131,8 @@ jobs:
         CHECKIN_STRICT: 'true'
         CHECKIN_MAX_ATTEMPTS: '3'
         CHECKIN_MAX_EGRESS_ROTATIONS: '2'
+        CHECKIN_STATE_FILE: checkin_state.json
+        CHECKIN_FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' && 'true' || 'false' }}
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}

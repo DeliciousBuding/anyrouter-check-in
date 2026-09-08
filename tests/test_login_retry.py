@@ -17,7 +17,7 @@ class FakeController(EgressController):
 	async def current_node(self):
 		return 'node-a'
 
-	async def rotate(self, excluded):
+	async def select_stable_node(self, account_key, excluded=None):
 		self.selected.append('node-b')
 		return 'node-b'
 

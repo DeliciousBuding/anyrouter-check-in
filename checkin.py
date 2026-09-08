@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -32,6 +32,7 @@ from utils.browser import (
 	login_with_email_form,
 	navigate_login_page,
 	prepare_browser_page,
+	sanitize_login_message,
 	save_login_screenshot,
 	verify_browser_login,
 	wait_for_waf_ready,
@@ -49,10 +50,72 @@ from utils.retry import (
 	classify_failure,
 	decide_retry,
 )
+from utils.state import DEFAULT_STATE_FILE, CheckinStateStore
 
 load_dotenv()
 
 BALANCE_SNAPSHOT_FILE = 'balance_snapshot.json'
+SITE_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+	raw = os.getenv(name)
+	if raw is None:
+		return default
+	return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _failure_retry_hours(kind: FailureKind) -> float:
+	"""失败后多久允许该账号再次尝试。认证失败不参与当轮重试。"""
+
+	return {
+		FailureKind.AUTH_INVALID: 24.0,
+		FailureKind.RATE_LIMITED: 6.0,
+		FailureKind.WAF_CHALLENGE: 2.0,
+		FailureKind.TRANSIENT_NETWORK: 1.0,
+		FailureKind.SITE_ERROR: 2.0,
+		FailureKind.PROXY_UNAVAILABLE: 1.0,
+		FailureKind.MANUAL_REQUIRED: 24.0,
+	}.get(kind, 6.0)
+
+
+def _quota_to_usd(value: object) -> float:
+	"""把 NewAPI 的 quota 整数换算成美元；异常值按 0 处理。"""
+
+	if not isinstance(value, (int, float, str)):
+		return 0.0
+	try:
+		return round(float(value) / 500000, 2)
+	except (TypeError, ValueError):
+		return 0.0
+
+
+def _user_info_from_data(user_data: dict) -> dict[str, Any]:
+	"""把 NewAPI /api/user/self 的 data 转成统一用户信息。"""
+
+	quota = _quota_to_usd(user_data.get('quota'))
+	used = _quota_to_usd(user_data.get('used_quota'))
+	bonus = _quota_to_usd(user_data.get('bonus_quota'))
+	display = f':money: Current balance: ${quota}, Used: ${used}'
+	if bonus:
+		display += f', Bonus: ${bonus}'
+	return {
+		'success': True,
+		'quota': quota,
+		'used_quota': used,
+		'bonus_quota': bonus,
+		'display': display,
+	}
+
+
+def _user_info_from_state(balance: dict[str, float]) -> dict[str, Any]:
+	return _user_info_from_data(
+		{
+			'quota': float(balance.get('quota') or 0.0) * 500000,
+			'used_quota': float(balance.get('used') or 0.0) * 500000,
+			'bonus_quota': float(balance.get('bonus') or 0.0) * 500000,
+		}
+	)
 
 
 def load_balance_snapshot():
@@ -78,10 +141,14 @@ def save_balance_snapshot(snapshot):
 
 
 def generate_balance_hash(balances):
-	"""生成余额数据的hash"""
-	simple_balances = (
-		{k: {'quota': v.get('quota'), 'used': v.get('used')} for k, v in balances.items()} if balances else {}
-	)
+	"""生成余额数据的 hash；bonus 为 0 时保持旧快照兼容。"""
+	simple_balances = {}
+	for key, value in (balances or {}).items():
+		item = {'quota': value.get('quota'), 'used': value.get('used')}
+		bonus = value.get('bonus')
+		if bonus:
+			item['bonus'] = bonus
+		simple_balances[key] = item
 	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
 	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
 
@@ -148,7 +215,7 @@ async def get_waf_cookies_with_browser(
 		return waf_cookies
 
 	except Exception as e:
-		print(f'[FAILED] {account_name}: Error occurred while getting WAF cookies: {e}')
+		print(f'[FAILED] {account_name}: Error occurred while getting WAF cookies: {sanitize_login_message(e)}')
 		await browser.close()
 		return None
 
@@ -208,7 +275,7 @@ async def login_with_credentials(
 			if await has_session_cookie(page):
 				print(f'[WARN] {account_name}: Stale session cookie on login page, forcing email login')
 			await save_login_screenshot(page, provider_name, account_name, 'before-email-login')
-			await login_with_email_form(
+			form_result = await login_with_email_form(
 				page,
 				email,
 				password,
@@ -216,6 +283,18 @@ async def login_with_credentials(
 				provider=provider_name,
 				account_name=account_name,
 			)
+			if form_result.api_status == 429:
+				raise LoginFlowError(FailureKind.RATE_LIMITED, 'login API rate limited')
+			if form_result.api_status in (401, 403):
+				raise LoginFlowError(FailureKind.AUTH_INVALID, f'login API HTTP {form_result.api_status}')
+			if form_result.api_status is not None and form_result.api_status >= 500:
+				raise LoginFlowError(FailureKind.SITE_ERROR, f'login API HTTP {form_result.api_status}')
+			if form_result.api_success is False:
+				message = form_result.api_message or 'login API returned success=false'
+				kind = classify_failure(message)
+				if kind == FailureKind.UNKNOWN:
+					kind = FailureKind.AUTH_INVALID
+				raise LoginFlowError(kind, message)
 		else:
 			print(f'[INFO] {account_name}: Browser profile already logged in')
 
@@ -261,6 +340,24 @@ async def login_with_credentials(
 				pass
 
 
+def get_check_in_status(client, headers, status_url: str) -> bool | None:
+	"""查询 NewAPI 今日签到状态；查询失败返回 None，不阻断签到。"""
+
+	try:
+		response = client.get(status_url, headers=headers, timeout=30)
+		if response.status_code != 200:
+			return None
+		data = response.json()
+		if not isinstance(data, dict) or not data.get('success'):
+			return None
+		status_data = data.get('data') or {}
+		stats = status_data.get('stats') if isinstance(status_data, dict) else {}
+		checked = stats.get('checked_in_today') if isinstance(stats, dict) else None
+		return checked if isinstance(checked, bool) else None
+	except Exception:  # nosec B110
+		return None
+
+
 def get_user_info(client, headers, user_info_url: str):
 	"""获取用户信息"""
 	try:
@@ -270,17 +367,13 @@ def get_user_info(client, headers, user_info_url: str):
 			data = response.json()
 			if data.get('success'):
 				user_data = data.get('data', {})
-				quota = round(user_data.get('quota', 0) / 500000, 2)
-				used_quota = round(user_data.get('used_quota', 0) / 500000, 2)
-				return {
-					'success': True,
-					'quota': quota,
-					'used_quota': used_quota,
-					'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
-				}
+				if not isinstance(user_data, dict):
+					return {'success': False, 'error': 'Failed to get user info: invalid data'}
+				return _user_info_from_data(user_data)
 		return {'success': False, 'error': f'Failed to get user info: HTTP {response.status_code}'}
 	except Exception as e:
-		return {'success': False, 'error': f'Failed to get user info: {str(e)[:50]}...'}
+		message = sanitize_login_message(f'Failed to get user info: {str(e)[:50]}...')
+		return {'success': False, 'error': message or 'Failed to get user info'}
 
 
 async def prepare_cookies(account_name: str, provider_config, user_cookies: dict) -> dict | None:
@@ -323,11 +416,12 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				print(f'[SUCCESS] {account_name}: Check-in successful!')
 				return True, None
 			else:
-				error_msg = result.get('msg', result.get('message', 'Unknown error'))
+				error_msg = str(result.get('msg', result.get('message', 'Unknown error')) or 'Unknown error')
 				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
 				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
 					print(f'[SUCCESS] {account_name}: Already checked in today')
 					return True, None
+				error_msg = sanitize_login_message(error_msg) or 'Unknown error'
 				print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
 				return False, error_msg
 		except json.JSONDecodeError:
@@ -346,13 +440,23 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 
 def format_check_in_notification(detail: dict) -> str:
 	"""格式化签到通知消息"""
+	before_bonus = float(detail.get('before_bonus', 0) or 0)
+	after_bonus = float(detail.get('after_bonus', 0) or 0)
+	before_bonus_text = f'  |  Bonus: ${before_bonus:.2f}' if before_bonus else ''
+	after_bonus_text = f'  |  Bonus: ${after_bonus:.2f}' if after_bonus else ''
 	lines = [
 		f'[CHECK-IN] {detail["name"]}',
 		'  ━━━━━━━━━━━━━━━━━━━━',
 		'  签到前',
-		f'     余额: ${detail["before_quota"]:.2f}  |  累计消耗: ${detail["before_used"]:.2f}',
+		(
+			f'     余额: ${detail["before_quota"] + before_bonus:.2f}'
+			f'  |  累计消耗: ${detail["before_used"]:.2f}{before_bonus_text}'
+		),
 		'  签到后',
-		f'     余额: ${detail["after_quota"]:.2f}  |  累计消耗: ${detail["after_used"]:.2f}',
+		(
+			f'     余额: ${detail["after_quota"] + after_bonus:.2f}'
+			f'  |  累计消耗: ${detail["after_used"]:.2f}{after_bonus_text}'
+		),
 	]
 
 	has_reward = detail['check_in_reward'] != 0
@@ -386,10 +490,11 @@ async def login_with_retry(
 	email: str,
 	password: str,
 	egress_rotator: EgressRotator | None = None,
+	retry_policy: RetryPolicy | None = None,
 ) -> BrowserLoginResult:
 	"""执行邮箱密码登录，并按失败类型在同节点重试或轮换出口。"""
 
-	policy = RetryPolicy.from_env()
+	policy = retry_policy or RetryPolicy.from_env()
 	same_node_retries = 0
 	last_error: LoginFlowError | None = None
 
@@ -444,7 +549,8 @@ async def check_in_account(
 	account: AccountConfig,
 	account_index: int,
 	app_config: AppConfig,
-	egress_rotator: EgressRotator | None = None,
+	egress_controller: EgressController | None = None,
+	retry_policy: RetryPolicy | None = None,
 ):
 	"""为单个账号执行签到操作，返回 (success, before, after, error_msg)"""
 	account_name = account.get_log_label(account_index)
@@ -457,6 +563,16 @@ async def check_in_account(
 		return False, None, None, message
 
 	print(f'[INFO] {account_name}: Using provider "{account.provider}" ({provider_config.domain})')
+
+	egress_rotator: EgressRotator | None = None
+	policy = retry_policy or RetryPolicy.from_env()
+	if provider_config.use_proxy and egress_controller is not None:
+		egress_rotator = EgressRotator(
+			egress_controller,
+			account.get_state_key(account_index),
+			policy.max_egress_rotations,
+		)
+		await egress_rotator.ensure_selected()
 
 	if provider_config.use_proxy and not get_proxy_server(use_proxy=True):
 		# 该 provider 必须走代理：数据中心 IP 会被下发滑块人机验证，登录页根本不渲染。
@@ -481,9 +597,10 @@ async def check_in_account(
 				account.email,
 				account.password,
 				egress_rotator=egress_rotator if provider_config.use_proxy else None,
+				retry_policy=policy,
 			)
 		except LoginFlowError as exc:
-			message = str(exc)
+			message = sanitize_login_message(exc) or 'login failed'
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
 		all_cookies = login_result.cookies
@@ -560,6 +677,7 @@ async def check_in_via_browser(
 	)
 	effective_api_user = api_user_override or account.api_user
 	context = None
+	page = None
 	try:
 		context = await launch_login_context(settings, use_proxy=provider_config.use_proxy)
 		page = await context.new_page()
@@ -572,7 +690,7 @@ async def check_in_via_browser(
 			if name == 'session' and value
 		]
 		if not session_cookies:
-			message = '未提供 session cookie，无法浏览器内签到'
+			message = 'session invalid: 未提供 session cookie，无法浏览器内签到'
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
 		await context.add_cookies(cast(Any, session_cookies))
@@ -596,7 +714,10 @@ async def check_in_via_browser(
 				await wait_for_waf_ready(page)
 
 		if not profile:
-			message = '浏览器内 /api/user/self 未返回有效用户信息（session 过期或 WAF 拦截）'
+			if await is_waf_challenge(page):
+				message = 'browser check-in blocked by WAF'
+			else:
+				message = 'session expired: /api/user/self did not return a user profile'
 			print(f'[FAILED] {account_name}: {message}')
 			return False, None, None, message
 
@@ -604,7 +725,10 @@ async def check_in_via_browser(
 		print(f'[SUCCESS] {account_name}: Check-in completed via browser (user info queried)')
 		return True, None, user_info_after, None
 	except Exception as exc:
-		message = str(exc)[:120]
+		if page is not None and await is_waf_challenge(page):
+			message = 'browser check-in blocked by WAF'
+		else:
+			message = sanitize_login_message(exc) or 'browser check-in failed'
 		print(f'[FAILED] {account_name}: Browser check-in error - {message}')
 		return False, None, None, message
 	finally:
@@ -640,7 +764,9 @@ async def request_user_self_via_document_navigation(
 		await page.route('**/api/user/self', attach_user_header)
 		await page.goto(api_url, wait_until='domcontentloaded', timeout=60_000)
 	except Exception as exc:  # nosec B110
-		print(f'[WARN] {account_name}: document navigation unavailable ({str(exc)[:80]})')
+		print(
+			f'[WARN] {account_name}: document navigation unavailable ({sanitize_login_message(exc) or "unknown error"})'
+		)
 		return None
 
 	for _ in range(8):
@@ -660,7 +786,9 @@ async def request_user_self_via_document_navigation(
 				print(f'[INFO] {account_name}: document navigation returned user profile')
 				return data
 		if parsed and isinstance(parsed, dict):
-			print(f'[INFO] {account_name}: API returned: {str(parsed)[:120]}')
+			message = parsed.get('message') or parsed.get('msg')
+			safe_message = sanitize_login_message(message) or 'no message'
+			print(f'[INFO] {account_name}: API returned success=false: {safe_message}')
 		else:
 			print(f'[INFO] {account_name}: page body not JSON yet (WAF challenge solving)')
 		await asyncio.sleep(3)
@@ -698,20 +826,15 @@ async def fetch_user_self_in_browser(page, api_user: str | None, account_name: s
 		data = payload.get('data')
 		if isinstance(data, dict) and data.get('id'):
 			return data
-	print(f'[INFO] {account_name}: browser fetch success=false: {str(payload)[:120]}')
+	message = payload.get('message') or payload.get('msg')
+	print(f'[INFO] {account_name}: browser fetch success=false: {sanitize_login_message(message) or "no message"}')
 	return None
 
 
 def format_user_info_from_profile(profile: dict) -> dict:
 	"""把 /api/user/self 的 data 对象转成 get_user_info 同构结果。"""
-	quota = round(float(profile.get('quota', 0)) / 500000, 2)
-	used_quota = round(float(profile.get('used_quota', 0)) / 500000, 2)
-	return {
-		'success': True,
-		'quota': quota,
-		'used_quota': used_quota,
-		'display': f':money: Current balance: ${quota}, Used: ${used_quota}',
-	}
+
+	return _user_info_from_data(profile)
 
 
 def run_check_in_requests(
@@ -730,7 +853,7 @@ def run_check_in_requests(
 		if proxy_url:
 			client_kwargs['proxy'] = proxy_url
 			if is_debug_enabled():
-				print(f'[INFO] {account_name}: HTTP client proxy enabled: {proxy_url}')
+				print(f'[INFO] {account_name}: HTTP client proxy enabled (url withheld)')
 			else:
 				print(f'[INFO] {account_name}: HTTP client proxy enabled')
 		elif use_proxy:
@@ -766,6 +889,13 @@ def run_check_in_requests(
 				print(user_info_before.get('error', 'Unknown error'))
 
 			if provider_config.needs_manual_check_in():
+				if provider_config.check_in_status_path:
+					month = datetime.now(SITE_TIMEZONE).strftime('%Y-%m')
+					status_url = f'{provider_config.domain}{provider_config.check_in_status_path}?month={month}'
+					if get_check_in_status(client, headers, status_url) is True:
+						print(f'[SUCCESS] {account_name}: Already checked in today')
+						user_info_after = get_user_info(client, headers, user_info_url)
+						return True, user_info_before, user_info_after, None
 				success, checkin_error = execute_check_in(client, account_name, provider_config, headers)
 				user_info_after = get_user_info(client, headers, user_info_url)
 				return success, user_info_before, user_info_after, checkin_error
@@ -779,8 +909,8 @@ def run_check_in_requests(
 			return False, user_info_before, user_info_after, error
 
 	except Exception as e:
-		message = str(e)[:80]
-		print(f'[FAILED] {account_name}: Error occurred during check-in process - {message}...')
+		message = sanitize_login_message(f'{str(e)[:80]}...') or 'check-in request failed'
+		print(f'[FAILED] {account_name}: Error occurred during check-in process - {message}')
 		return False, None, None, message
 
 
@@ -827,11 +957,12 @@ async def main():
 
 	retry_policy = RetryPolicy.from_env()
 	egress_controller = EgressController.from_env()
-	egress_rotator = EgressRotator(egress_controller, retry_policy.max_egress_rotations) if egress_controller else None
-	if egress_rotator:
-		print('[INFO] Egress rotation controller enabled')
+	if egress_controller:
+		print('[INFO] Egress controller enabled; selection is per account')
 	else:
-		print('[INFO] Egress rotation controller unavailable; WAF retries will stop after one attempt')
+		print('[INFO] Egress controller unavailable; WAF retries will stop after one attempt')
+	state_store = CheckinStateStore.load(os.getenv('CHECKIN_STATE_FILE', DEFAULT_STATE_FILE))
+	force = _env_bool('CHECKIN_FORCE', False)
 
 	last_snapshot = load_balance_snapshot()
 	last_balance_hash = last_snapshot['hash'] if last_snapshot else None
@@ -839,18 +970,68 @@ async def main():
 
 	success_count = 0
 	total_count = len(accounts)
-	notification_content = []
-	current_balances = {}
-	account_check_in_details = {}
+	notification_content: list[str] = []
+	current_balances: dict[str, dict[str, float]] = {}
+	account_check_in_details: dict[str, dict[str, Any]] = {}
 	need_notify = False
 	balance_changed = False
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
+		state_key = account.get_state_key(i)
 		try:
-			success, user_info_before, user_info_after, error_msg = await check_in_account(
-				account, i, app_config, egress_rotator=egress_rotator
-			)
+			provider_config = app_config.get_provider(account.provider)
+			skip_reason = None
+			if provider_config:
+				skip_reason = state_store.skip_reason(
+					state_key,
+					daily_success_cooldown_hours=provider_config.daily_success_cooldown_hours,
+					force=force,
+				)
+
+			if skip_reason:
+				recent_success = state_store.is_recent_success(
+					state_key,
+					daily_success_cooldown_hours=provider_config.daily_success_cooldown_hours
+					if provider_config
+					else 0.0,
+				)
+				last_balance = state_store.last_balance(state_key)
+				user_info_before = None
+				if recent_success:
+					success = True
+					error_msg = None
+					user_info_after = _user_info_from_state(last_balance or {})
+					print(f'[SKIP] {account.get_log_label(i)}: {skip_reason}')
+				else:
+					success = False
+					user_info_after = None
+					error_msg = f'skipped: {skip_reason}'
+					print(f'[SKIP] {account.get_log_label(i)}: {error_msg}')
+			else:
+				state_store.mark_attempt(state_key)
+				success, user_info_before, user_info_after, error_msg = await check_in_account(
+					account,
+					i,
+					app_config,
+					egress_controller=egress_controller,
+					retry_policy=retry_policy,
+				)
+				if success:
+					state_store.mark_success(
+						state_key,
+						quota=(user_info_after or {}).get('quota'),
+						used=(user_info_after or {}).get('used_quota'),
+						bonus=(user_info_after or {}).get('bonus_quota'),
+					)
+				else:
+					kind = classify_failure(error_msg or '')
+					state_store.mark_failure(
+						state_key,
+						kind.value,
+						retry_after_hours=_failure_retry_hours(kind),
+					)
+
 			if success:
 				success_count += 1
 
@@ -866,8 +1047,10 @@ async def main():
 				'error': error_msg,
 				'before_quota': 0.0,
 				'before_used': 0.0,
+				'before_bonus': 0.0,
 				'after_quota': 0.0,
 				'after_used': 0.0,
+				'after_bonus': 0.0,
 				'check_in_reward': 0.0,
 				'usage_increase': 0.0,
 				'balance_change': 0.0,
@@ -879,31 +1062,37 @@ async def main():
 				print(f'[NOTIFY] {account.get_log_label(i)} failed, will send notification')
 
 			if user_info_after and user_info_after.get('success'):
-				current_quota = user_info_after['quota']
-				current_used = user_info_after['used_quota']
-				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
+				current_quota = float(user_info_after['quota'])
+				current_used = float(user_info_after['used_quota'])
+				current_bonus = float(user_info_after.get('bonus_quota', 0.0) or 0.0)
+				current_balances[account_key] = {'quota': current_quota, 'used': current_used, 'bonus': current_bonus}
 				account_check_in_details[account_key]['after_quota'] = current_quota
 				account_check_in_details[account_key]['after_used'] = current_used
+				account_check_in_details[account_key]['after_bonus'] = current_bonus
 
 				if user_info_before and user_info_before.get('success'):
-					before_quota = user_info_before['quota']
-					before_used = user_info_before['used_quota']
-					after_quota = user_info_after['quota']
-					after_used = user_info_after['used_quota']
+					before_quota = float(user_info_before['quota'])
+					before_used = float(user_info_before['used_quota'])
+					before_bonus = float(user_info_before.get('bonus_quota', 0.0) or 0.0)
+					after_quota = current_quota
+					after_used = current_used
+					after_bonus = current_bonus
 
-					total_before = before_quota + before_used
-					total_after = after_quota + after_used
+					total_before = before_quota + before_bonus + before_used
+					total_after = after_quota + after_bonus + after_used
 
 					check_in_reward = total_after - total_before
 					usage_increase = after_used - before_used
-					balance_change = after_quota - before_quota
+					balance_change = (after_quota + after_bonus) - (before_quota + before_bonus)
 
 					account_check_in_details[account_key].update(
 						{
 							'before_quota': before_quota,
 							'before_used': before_used,
+							'before_bonus': before_bonus,
 							'after_quota': after_quota,
 							'after_used': after_used,
+							'after_bonus': after_bonus,
 							'check_in_reward': check_in_reward,
 							'usage_increase': usage_increase,
 							'balance_change': balance_change,
@@ -932,18 +1121,32 @@ async def main():
 				'error': str(e)[:80],
 				'before_quota': 0.0,
 				'before_used': 0.0,
+				'before_bonus': 0.0,
 				'after_quota': 0.0,
 				'after_used': 0.0,
+				'after_bonus': 0.0,
 				'check_in_reward': 0.0,
 				'usage_increase': 0.0,
 				'balance_change': 0.0,
 			}
-			print(f'[FAILED] {account.get_log_label(i)} processing exception: {e}')
+			kind = classify_failure(str(e))
+			state_store.mark_failure(
+				state_key,
+				kind.value,
+				retry_after_hours=_failure_retry_hours(kind),
+			)
+			print(
+				f'[FAILED] {account.get_log_label(i)} processing exception: {sanitize_login_message(e) or "unknown error"}'
+			)
 			need_notify = True
 			notification_content.append(f'[FAIL] {account.get_log_label(i)} exception: {str(e)[:50]}...')
 
 		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
-		current_total_quota = sum(v['quota'] for v in current_balances.values()) if current_balances else 0.0
+		current_total_quota = (
+			sum(v['quota'] + float(v.get('bonus', 0.0) or 0.0) for v in current_balances.values())
+			if current_balances
+			else 0.0
+		)
 		if current_balance_hash:
 			if last_balance_hash is None:
 				balance_changed = True
@@ -958,12 +1161,14 @@ async def main():
 			else:
 				print('[INFO] No balance changes detected')
 
+	state_store.save()
+
 	if balance_changed:
 		for i, account in enumerate(accounts):
 			account_key = f'account_{i + 1}'
 			if account_key in account_check_in_details:
 				detail = account_check_in_details[account_key]
-				account_name = detail['name']
+				account_name = str(detail['name'])
 				account_result = format_check_in_notification(detail)
 				if not any(account_name in item for item in notification_content):
 					notification_content.append(account_result)
@@ -983,16 +1188,14 @@ async def main():
 				'label': detail.get('label', identity['label']),
 				'success': detail.get('success', False),
 				'error': detail.get('error'),
-				'balance': float(detail.get('after_quota', 0) or 0),
+				'balance': float(detail.get('after_quota', 0) or 0) + float(detail.get('after_bonus', 0) or 0),
+				'bonus': float(detail.get('after_bonus', 0) or 0),
 				'balance_delta': float(detail.get('balance_change', 0) or 0),
 				'used': float(detail.get('after_used', 0) or 0),
 				'used_delta': float(detail.get('usage_increase', 0) or 0),
 				'reward': float(detail.get('check_in_reward', 0) or 0),
 			}
 		)
-
-	if egress_rotator and egress_rotator.rotations:
-		print(f'[INFO] Egress rotations used: {egress_rotator.rotations}')
 
 	print(f'[NOTIFY] smart notify: {success_count}/{total_count} ok')
 	sent = smart_notify(structured_results)
@@ -1011,7 +1214,7 @@ def run_main():
 		print('\n[WARNING] Program interrupted by user')
 		sys.exit(1)
 	except Exception as e:
-		print(f'\n[FAILED] Error occurred during program execution: {e}')
+		print(f'\n[FAILED] Error occurred during program execution: {sanitize_login_message(e) or "unknown error"}')
 		sys.exit(1)
 
 

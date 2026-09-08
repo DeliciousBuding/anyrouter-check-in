@@ -86,6 +86,34 @@ class EgressController:
 	async def select_node(self, name: str) -> None:
 		await self._request('PUT', f'/proxies/{self.group}', payload={'name': name})
 
+	async def select_stable_node(self, account_key: str, excluded: set[str] | None = None) -> str | None:
+		"""优先复用当前节点，否则按账号 hash 确定性选择备用节点。
+
+		同一轮里 mihomo 控制组是全局单例。先复用已选中的当前节点，避免每个账号
+		都把出口切来切去；只有当前节点不可用或被排除时，才按账号 hash 选一个稳定
+		备用节点。节点名只用于本地 API，不进入日志。
+		"""
+
+		nodes = await self.list_nodes()
+		excluded = excluded or set()
+		available = [name for name in nodes if name not in excluded]
+		if not available:
+			return None
+		current = await self.current_node()
+		if current in available:
+			return current
+		ordered = sorted(
+			available,
+			key=lambda name: hashlib.sha256(f'{account_key}:{name}'.encode('utf-8')).hexdigest(),
+		)
+		for name in ordered:
+			try:
+				await self.select_node(name)
+			except Exception:  # nosec B112
+				continue
+			return name
+		return None
+
 	async def rotate(self, excluded: set[str]) -> str | None:
 		"""按控制组顺序选择下一个未排除节点。节点名不落日志。"""
 
@@ -106,12 +134,18 @@ class EgressController:
 
 @dataclass
 class EgressRotator:
-	"""整轮共享的轮换预算和已排除节点集合。"""
+	"""单账号轮换预算和已排除节点集合。"""
 
 	controller: EgressController
-	max_rotations: int
+	account_key: str = 'default'
+	max_rotations: int = 2
 	rotations: int = 0
 	excluded: set[str] = field(default_factory=set)
+
+	async def ensure_selected(self) -> str | None:
+		"""确保该账号已经绑定到一个稳定节点。"""
+
+		return await self.controller.select_stable_node(self.account_key, self.excluded)
 
 	async def rotate(self) -> tuple[str | None, str | None]:
 		if self.rotations >= self.max_rotations:
@@ -119,7 +153,7 @@ class EgressRotator:
 		current = await self.controller.current_node()
 		if current and current != self.controller.auto_group:
 			self.excluded.add(current)
-		node = await self.controller.rotate(self.excluded)
+		node = await self.controller.select_stable_node(self.account_key, self.excluded)
 		if not node:
 			return None, None
 		self.excluded.add(node)

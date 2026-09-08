@@ -9,6 +9,9 @@ __pycache__
 coverage.xml
 htmlcov
 balance_hash.txt
+balance_snapshot.json
+notify_state.json
+checkin_state.json
 .browser_profiles
 checkin_screenshots
 
