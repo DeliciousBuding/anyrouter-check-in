@@ -1157,6 +1157,9 @@ async def main():
 			need_notify = True
 			notification_content.append(f'[FAIL] {account.get_log_label(i)} exception: {str(e)[:50]}...')
 
+		# 每个账号处理完立即原子落盘，后续账号异常时已成功状态仍可持久化。
+		state_store.save()
+
 		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
 		current_total_quota = (
 			sum(v['quota'] + float(v.get('bonus', 0.0) or 0.0) for v in current_balances.values())
