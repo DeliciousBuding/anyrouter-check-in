@@ -55,6 +55,8 @@ jobs:
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
           PROVIDERS: ${{ secrets.PROVIDERS }}
           PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
+          PROXY_SUBSCRIPTION_URL_FALLBACK: ${{ secrets.PROXY_SUBSCRIPTION_URL_FALLBACK }}
+          PROXY_NODE_FILTER: ${{ secrets.PROXY_NODE_FILTER }}
           DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
@@ -75,7 +77,11 @@ jobs:
         run: |
           set -euo pipefail
           required="ANYROUTER_ACCOUNTS"
-          optional="PROVIDERS PROXY_SUBSCRIPTION_URL DINGDING_WEBHOOK EMAIL_USER EMAIL_PASS EMAIL_TO EMAIL_SENDER CUSTOM_SMTP_SERVER PUSHPLUS_TOKEN SERVERPUSHKEY FEISHU_WEBHOOK WEIXIN_WEBHOOK TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY BARK_KEY BARK_SERVER"
+          if printf '%s' "${ANYROUTER_ACCOUNTS:-}" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if isinstance(data, list) and any(isinstance(account, dict) and account.get("provider", "anyrouter") == "agentrouter" for account in data) else 1)' 2>/dev/null; then
+            required="$required PROXY_SUBSCRIPTION_URL"
+            echo "AgentRouter accounts detected; proxy subscription is required"
+          fi
+          optional="PROVIDERS PROXY_SUBSCRIPTION_URL_FALLBACK PROXY_NODE_FILTER DINGDING_WEBHOOK EMAIL_USER EMAIL_PASS EMAIL_TO EMAIL_SENDER CUSTOM_SMTP_SERVER PUSHPLUS_TOKEN SERVERPUSHKEY FEISHU_WEBHOOK WEIXIN_WEBHOOK TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY BARK_KEY BARK_SERVER"
           missing_required=""
           missing_optional=""
           for var in $required; do

@@ -121,15 +121,16 @@
 
 ## 执行时间
 
-- 脚本每 6 小时执行一次（1. action 无法准确触发，基本延时 1~1.5h；2. 目前观测到 anyrouter 的签到是每 24h 而不是零点就可签到）
-- 你也可以随时手动触发签到
+- workflow 每 6 小时调度一次；GitHub schedule 不保证准点，实测可能延迟数小时。
+- AnyRouter 每轮先查 `/api/user/checkin`，已签到则跳过写请求；AgentRouter 没有签到端点，登录事件触发奖励，同一 UTC 日历日最多成功登录一次（跨日重试至少间隔 6h）。
+- 你可以随时手动触发；AgentRouter 不要连续重复触发，避免短时间重复登录被站点拒绝。
 
 ## 注意事项
 
-- 请确保每个账号的 cookies 和 API User 都是正确的
+- 请确保每个账号的邮箱+密码或 session cookies（cookie 模式还要有 API User）正确
 - 可以在 Actions 页面查看详细的运行日志
-- 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
-- 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
+- 本 fork 的生产 workflow 已启用 `CHECKIN_STRICT=true`：任一账号失败时 job 返回非零；其他账号仍会继续处理，状态也会保存。
+- session cookie 报 401 时请重新获取 cookies；理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
 
 ## 配置示例
@@ -277,9 +278,9 @@
 - `PROVIDERS` 是可选的，不配置则使用内置的 `anyrouter` 和 `agentrouter`
 - 自定义的 provider 配置会覆盖同名的默认配置
 
-## 代理配置（可选）
+## 代理配置（AgentRouter 必需）
 
-内置的 `agentrouter` 默认 `use_proxy: true`。如果你的运行环境访问该平台不稳定，可以在 GitHub Actions 中配置 mihomo 订阅代理。
+内置的 `agentrouter` 默认 `use_proxy: true`。因此**使用 AgentRouter 时必须配置代理**；只用 AnyRouter 时可以完全不配。代理未就绪时 AgentRouter fail-closed，不会直连数据中心 IP 硬撞 WAF。
 
 在仓库 Settings -> Environments -> production -> Environment secrets 中添加：
 
@@ -296,7 +297,8 @@ PROVIDERS={"agentrouter":{"use_proxy":true}}
 
 可选备用订阅：
 
-- `PROXY_SUBSCRIPTION_URL_FALLBACK`：主订阅全部节点不可用时参与选路的第二订阅。与主订阅共用 `PROXY_NODE_FILTER`，没有配置时自动跳过。
+- `PROXY_SUBSCRIPTION_URL_FALLBACK`：可选第二订阅节点池，与主订阅共同参与 `CHECKIN_AUTO` 选路；主订阅故障时仍可提供节点。与主订阅共用 `PROXY_NODE_FILTER`，未配置时自动跳过。
+- `PROXY_NODE_FILTER`：可选节点名正则，用于收窄订阅出口；如果值会暴露地区，放在 GitHub Secret 中。
 
 WAF 重试与出口轮换：
 
@@ -393,10 +395,11 @@ WAF 重试与出口轮换：
 如果签到失败，请检查：
 
 1. 账号配置格式是否正确
-2. cookies 是否过期
-3. API User 是否正确
-4. 网站是否更改了签到接口
-5. 查看 Actions 运行日志获取详细错误信息
+2. 邮箱+密码是否有效，或 session cookie 是否过期
+3. cookie 模式的 API User 是否正确
+4. AgentRouter 是否配置了 `PROXY_SUBSCRIPTION_URL`（或本地 `CHECKIN_PROXY_URL`），代理是否可用
+5. 网站是否更改了签到接口
+6. 查看 Actions 运行日志获取详细错误信息
 
 ## 本地开发环境设置
 
