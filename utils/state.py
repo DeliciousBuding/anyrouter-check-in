@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STATE_VERSION = 1
 DEFAULT_STATE_FILE = 'checkin_state.json'
@@ -42,6 +43,13 @@ def _float_or_none(value: object) -> float | None:
 	if isinstance(value, (int, float)):
 		return float(value)
 	return None
+
+
+def _timezone(name: str) -> timezone | ZoneInfo:
+	try:
+		return ZoneInfo(name)
+	except (ZoneInfoNotFoundError, ValueError):
+		return timezone.utc
 
 
 @dataclass
@@ -115,6 +123,22 @@ class CheckinStateStore:
 			}
 		)
 
+	def successful_today(
+		self,
+		key: str,
+		*,
+		timezone_name: str = 'UTC',
+		now: datetime | None = None,
+	) -> bool:
+		"""按站点日判断今天是否已经成功，避免滚动 24h 漏掉下一个日历日。"""
+
+		current = now or utc_now()
+		last_success = _parse(self.account(key).get('last_success_at'))
+		if last_success is None:
+			return False
+		tz = _timezone(timezone_name)
+		return last_success.astimezone(tz).date() == current.astimezone(tz).date()
+
 	def is_recent_success(
 		self,
 		key: str,
@@ -135,6 +159,7 @@ class CheckinStateStore:
 		key: str,
 		*,
 		daily_success_cooldown_hours: float = 0.0,
+		daily_success_timezone: str = 'UTC',
 		force: bool = False,
 		now: datetime | None = None,
 	) -> str | None:
@@ -143,6 +168,11 @@ class CheckinStateStore:
 		current = now or utc_now()
 		entry = self.account(key)
 		last_success = _parse(entry.get('last_success_at'))
+		if daily_success_cooldown_hours > 0 and self.successful_today(
+			key, timezone_name=daily_success_timezone, now=current
+		):
+			assert last_success is not None
+			return f'last successful login was {last_success.isoformat()} (same {daily_success_timezone} day)'
 		if self.is_recent_success(key, daily_success_cooldown_hours=daily_success_cooldown_hours, now=current):
 			assert last_success is not None
 			return f'last successful login was {last_success.isoformat()} (within {daily_success_cooldown_hours:g}h)'

@@ -998,6 +998,7 @@ async def main():
 				skip_reason = state_store.skip_reason(
 					state_key,
 					daily_success_cooldown_hours=provider_config.daily_success_cooldown_hours,
+					daily_success_timezone=provider_config.daily_success_timezone,
 					force=force,
 				)
 
@@ -1007,6 +1008,9 @@ async def main():
 					daily_success_cooldown_hours=provider_config.daily_success_cooldown_hours
 					if provider_config
 					else 0.0,
+				) or state_store.successful_today(
+					state_key,
+					timezone_name=provider_config.daily_success_timezone if provider_config else 'UTC',
 				)
 				last_balance = state_store.last_balance(state_key)
 				user_info_before = None
