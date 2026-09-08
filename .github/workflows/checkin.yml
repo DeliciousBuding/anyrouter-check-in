@@ -74,7 +74,7 @@ jobs:
         echo "✅ CloakBrowser 安装完成"
 
     - name: 恢复余额历史缓存
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: balance_snapshot.json
         key: balance-snapshot-${{ github.ref_name }}-${{ github.run_id }}
@@ -83,7 +83,7 @@ jobs:
           balance-snapshot-
 
     - name: 恢复状态文件
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: notify_state.json
         # GitHub Cache key 不可覆盖；每次使用唯一 key 才能保存新状态。
@@ -91,7 +91,7 @@ jobs:
         restore-keys: notify-state-
 
     - name: 恢复签到状态
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: checkin_state.json
         key: checkin-state-${{ github.ref_name }}-${{ github.run_id }}
@@ -143,6 +143,32 @@ jobs:
         CUSTOM_SMTP_SERVER: ${{ secrets.CUSTOM_SMTP_SERVER }}
       run: |
         xvfb-run -a --server-args="-screen 0 1920x1080x24" uv run checkin.py
+
+    # cache@v5 的 post-save 默认依赖 job success；严格模式失败时状态不会落盘。
+    # 显式 save + always() 才能保证失败账号也持久化，避免下一轮重复登录。
+    - name: 保存余额历史缓存
+      if: always() && hashFiles('balance_snapshot.json') != ''
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: balance_snapshot.json
+        key: balance-snapshot-${{ github.ref_name }}-${{ github.run_id }}
+
+    - name: 保存状态文件
+      if: always() && hashFiles('notify_state.json') != ''
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: notify_state.json
+        key: notify-state-${{ github.ref_name }}-${{ github.run_id }}
+
+    - name: 保存签到状态
+      if: always() && hashFiles('checkin_state.json') != ''
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: checkin_state.json
+        key: checkin-state-${{ github.ref_name }}-${{ github.run_id }}
 
     - name: 上传调试截图
       if: always() && env.DEBUG_MODE == 'true'
