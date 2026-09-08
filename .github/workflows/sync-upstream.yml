@@ -51,7 +51,7 @@ jobs:
       - name: secrets 覆盖度自检
         id: audit
         env:
-          # 上游 checkin.yml 引用的 secret 清单；为空视为未配置
+          # 本 fork checkin/proxy secret 清单；为空视为未配置
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
           PROVIDERS: ${{ secrets.PROVIDERS }}
           PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
