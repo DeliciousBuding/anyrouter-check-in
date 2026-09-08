@@ -161,23 +161,28 @@ data = json.load(sys.stdin)
 selected = data.get("now") or ""
 candidates = data.get("all") or []
 matched = sum(1 for name in candidates if re.search(pattern, name)) if pattern else len(candidates)
-selected_hit = bool(re.search(pattern, selected)) if pattern else None
+# 用集合成员判断选中项是否合规：对 now 再跑一次正则会因为 mihomo 内部命名与
+# all 列表的表示形式不一致而误报 False。
+selected_in_candidates = selected in candidates if selected else None
 digest = hashlib.sha256(selected.encode()).hexdigest()[:8]
 print(f"[INFO] Proxy group: candidates={len(candidates)} filter_matched={matched} "
-      f"selected_matches_filter={selected_hit} selected_sha={digest}")
+      f"selected_in_candidates={selected_in_candidates} selected_sha={digest}")
 ' "${PROXY_NODE_FILTER}" || echo "[WARN] Proxy group self-check could not be parsed"
 else
 	echo "[WARN] Proxy group self-check unavailable (mihomo API not reachable)"
 fi
 
-# 业务侧探测：判断这个出口对目标站点是否干净（有没有被下发人机验证页）
+# 业务侧探测：用普通 HTTP 客户端看这个出口对目标站是否被下发人机验证页。
+# 判据偏保守：探测用的是 curl，没有浏览器指纹。2026-09-08 实测 probe 报挑战页的同时，
+# CloakBrowser 走同一出口登录成功——所以 WARN 只代表「裸 HTTP 客户端过不去」，
+# 不代表浏览器路由会失败，别据此判定 provider 不可用。
 if [[ -n "${PROXY_PROBE_URL}" ]]; then
 	PROBE_BODY="$(curl -sS -x "${PROXY_URL}" --compressed --max-time 30 \
 		-A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36' \
 		"${PROXY_PROBE_URL}" 2>/dev/null || true)"
 	PROBE_BYTES="${#PROBE_BODY}"
 	if printf '%s' "${PROBE_BODY}" | grep -qiE 'Access Verification|slide to complete|please slide|请进行验证|为了更好的访问体验'; then
-		echo "[WARN] Probe: target is serving a human-verification challenge from this egress (${PROBE_BYTES} bytes)"
+		echo "[WARN] Probe: plain HTTP client got a verification challenge (${PROBE_BYTES} bytes); browser route may still pass"
 	elif [[ "${PROBE_BYTES}" -gt 0 ]]; then
 		echo "[SUCCESS] Probe: target responded through the egress, no challenge page (${PROBE_BYTES} bytes)"
 	else
