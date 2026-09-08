@@ -27,6 +27,9 @@ PROXY_NODE_FILTER="${PROXY_NODE_FILTER:-}"
 PROXY_PROBE_URL="${PROXY_PROBE_URL:-}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
+# 本地控制面只用于自检选路结果；口令每次随机生成，不来自 secret、也不落日志
+PROXY_API_PORT="${PROXY_API_PORT:-9097}"
+PROXY_API_SECRET="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
 mkdir -p "${PROXY_DIR}"
 cd "${PROXY_DIR}"
@@ -62,6 +65,8 @@ ipv6: false
 mode: rule
 log-level: warning
 unified-delay: true
+external-controller: 127.0.0.1:${PROXY_API_PORT}
+secret: "${PROXY_API_SECRET}"
 
 proxy-providers:
   subscription:
@@ -140,6 +145,29 @@ if [[ -n "${TRACE}" ]]; then
 	echo "[INFO] Egress check: loc=${EXIT_LOC:-unknown} colo=${EXIT_COLO:-unknown} (ip withheld)"
 else
 	echo "[WARN] Egress check unavailable (cloudflare trace failed through proxy)"
+fi
+
+# 选路自检：只报数量与哈希，不报节点名——节点名会同时暴露机场和出口地区。
+# candidates 与 filter_matched 用来判断 filter 是否真的收窄了候选集：
+# 两者相等且等于全订阅节点数即说明 filter 没生效。
+GROUP_JSON="$(curl -fsS --max-time 15 -H "Authorization: Bearer ${PROXY_API_SECRET}" \
+	"http://127.0.0.1:${PROXY_API_PORT}/proxies/CHECKIN" 2>/dev/null || true)"
+if [[ -n "${GROUP_JSON}" ]]; then
+	printf '%s' "${GROUP_JSON}" | python3 -c '
+import hashlib, json, re, sys
+
+pattern = sys.argv[1]
+data = json.load(sys.stdin)
+selected = data.get("now") or ""
+candidates = data.get("all") or []
+matched = sum(1 for name in candidates if re.search(pattern, name)) if pattern else len(candidates)
+selected_hit = bool(re.search(pattern, selected)) if pattern else None
+digest = hashlib.sha256(selected.encode()).hexdigest()[:8]
+print(f"[INFO] Proxy group: candidates={len(candidates)} filter_matched={matched} "
+      f"selected_matches_filter={selected_hit} selected_sha={digest}")
+' "${PROXY_NODE_FILTER}" || echo "[WARN] Proxy group self-check could not be parsed"
+else
+	echo "[WARN] Proxy group self-check unavailable (mihomo API not reachable)"
 fi
 
 # 业务侧探测：判断这个出口对目标站点是否干净（有没有被下发人机验证页）
