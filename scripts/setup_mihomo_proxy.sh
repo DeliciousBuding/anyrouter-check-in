@@ -76,14 +76,14 @@ proxy-providers:
     path: ./subscription.yaml
     health-check:
       enable: true
-      interval: 300
+      interval: 60
       url: https://www.gstatic.com/generate_204
 
 proxy-groups:
   - name: CHECKIN
     type: url-test
     url: "${PROXY_TEST_URL}"
-    interval: 300
+    interval: 60
     tolerance: 150
     lazy: false${GROUP_FILTER_YAML}
     use:

@@ -764,7 +764,7 @@ async def main():
 			if not success:
 				should_notify_this_account = True
 				need_notify = True
-				print(f'[NOTIFY] {identity["label"]} failed, will send notification')
+				print(f'[NOTIFY] {account.get_log_label(i)} failed, will send notification')
 
 			if user_info_after and user_info_after.get('success'):
 				current_quota = user_info_after['quota']

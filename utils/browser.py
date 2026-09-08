@@ -349,7 +349,17 @@ async def navigate_login_page(
 
 	for attempt in range(3):
 		print(f'[INFO] Navigating login page (attempt {attempt + 1}/3): {login_url}')
-		await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
+		try:
+			await page.goto(login_url, wait_until='load', timeout=attempt_timeout)
+		except Exception as exc:
+			# 代理节点中途失联会表现成导航被 chrome-error://chromewebdata/ 打断，属瞬时
+			# 故障：消耗一次重试而不是直接判死账号（2026-09-08 实跑 8 号里尾部 2 号即此
+			# 症状，同一轮前 6 号全绿）。最后一次仍失败才抛给调用方。
+			print(f'[WARN] Login navigation failed on attempt {attempt + 1}: {str(exc)[:120]}')
+			if attempt == 2:
+				raise
+			await asyncio.sleep(5)
+			continue
 		await _settle_page(page, 5, 20_000)
 
 		if await _wait_for_login_shell(page, attempt_timeout):
