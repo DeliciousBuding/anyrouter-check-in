@@ -478,8 +478,27 @@ async def _parse_user_self_response(response) -> dict | None:
 	try:
 		payload = await response.json()
 	except Exception:  # nosec B110
+		print(f'[WARN] {USER_SELF_API_SUFFIX} HTTP {response.status} returned non-JSON')
 		return None
-	return _extract_user_profile(payload)
+
+	profile = _extract_user_profile(payload)
+	if profile:
+		return profile
+
+	if isinstance(payload, dict):
+		data = payload.get('data')
+		if isinstance(data, dict):
+			data_shape = f'{type(data).__name__}:{",".join(sorted(data.keys()))}'
+		else:
+			data_shape = type(data).__name__
+		message = sanitize_login_message(payload.get('message') or payload.get('msg')) or ''
+		print(
+			f'[WARN] {USER_SELF_API_SUFFIX} HTTP {response.status} without profile '
+			f'success={payload.get("success")} code={payload.get("code")} data={data_shape} message={message}'
+		)
+	else:
+		print(f'[WARN] {USER_SELF_API_SUFFIX} HTTP {response.status} returned {type(payload).__name__}')
+	return None
 
 
 async def is_logged_in(page: Page) -> bool:

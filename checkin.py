@@ -310,6 +310,10 @@ async def login_with_credentials(
 				provider=provider_name,
 				account_name=account_name,
 			)
+			print(
+				f'[INFO] {account_name}: Login API status={form_result.api_status} '
+				f'success={form_result.api_success} message={form_result.api_message or "none"}'
+			)
 			if form_result.api_status == 429:
 				raise LoginFlowError(FailureKind.RATE_LIMITED, 'login API rate limited')
 			if form_result.api_status in (401, 403):
