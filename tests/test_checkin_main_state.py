@@ -17,7 +17,7 @@ class FakeAccount:
 
 
 class FakeAppConfig:
-	providers = {}
+	providers: dict[str, object] = {}
 
 	def get_provider(self, name):
 		return None

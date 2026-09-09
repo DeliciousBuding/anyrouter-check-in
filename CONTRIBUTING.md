@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你有兴趣为 anyrouter-check-in 项目做出贡献！本文档将指导你如何参与项目开发。
+感谢你有兴趣为 newapi-check-in 项目做出贡献！本文档将指导你如何参与项目开发。
 
 ## 📋 目录
 
@@ -22,8 +22,8 @@
 ### 克隆仓库
 
 ```bash
-git clone https://github.com/你的用户名/anyrouter-check-in.git
-cd anyrouter-check-in
+git clone https://github.com/DeliciousBuding/newapi-check-in.git
+cd newapi-check-in
 ```
 
 ### 安装依赖
@@ -277,7 +277,7 @@ PR 会自动更新，无需创建新的 PR。
 
 如果你有任何问题：
 
-- 查看现有的 [Issues](https://github.com/millylee/anyrouter-check-in/issues)
+- 查看现有的 [Issues](https://github.com/DeliciousBuding/newapi-check-in/issues)
 - 创建新的 Issue 描述你的问题
 - 在 PR 中 @维护者 寻求帮助
 

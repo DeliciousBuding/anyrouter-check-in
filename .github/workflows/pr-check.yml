@@ -116,7 +116,7 @@ jobs:
         with:
           file: ./coverage.xml
           flags: unittests
-          name: codecov-anyrouter-check-in
+          name: codecov-newapi-check-in
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 

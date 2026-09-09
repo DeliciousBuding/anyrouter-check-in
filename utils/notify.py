@@ -143,7 +143,7 @@ def _send_email(subject: str, content_html: str) -> bool:
 		return False
 	try:
 		message = MIMEText(content_html, 'html', 'utf-8')
-		message['From'] = f'AnyRouter Checkin <{sender}>'
+		message['From'] = f'NewAPI Check-in <{sender}>'
 		message['To'] = to
 		message['Subject'] = subject
 		server = smtp_server if smtp_server else f'smtp.{user.split("@")[1]}'
@@ -157,12 +157,12 @@ def _send_email(subject: str, content_html: str) -> bool:
 
 def _email_subject(kind: str, today: str, total_balance: float) -> str:
 	if kind == 'failure':
-		return f'[AnyRouter] 签到失败 · {today}'
+		return f'[NewAPI Check-in] 签到失败 · {today}'
 	if kind == 'first_success':
-		return f'[AnyRouter] 首次成功 · {today} · 余额 ${total_balance:.2f}'
+		return f'[NewAPI Check-in] 首次成功 · {today} · 余额 ${total_balance:.2f}'
 	if kind == 'balance_change':
-		return f'[AnyRouter] 余额变化 · {today} · ${total_balance:.2f}'
-	return f'[AnyRouter] 签到 · {today}'
+		return f'[NewAPI Check-in] 余额变化 · {today} · ${total_balance:.2f}'
+	return f'[NewAPI Check-in] 签到 · {today}'
 
 
 def _account_label(item: dict[str, Any]) -> str:

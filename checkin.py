@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AnyRouter.top 自动签到脚本
+NewAPI / OneAPI 多账号自动签到脚本
 """
 
 import asyncio

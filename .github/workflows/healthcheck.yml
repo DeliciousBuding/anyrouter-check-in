@@ -1,57 +1,23 @@
-name: Sync upstream & healthcheck
+name: Configuration healthcheck
 
 on:
   schedule:
     - cron: '23 2 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
-  sync-and-healthcheck:
+  healthcheck:
     runs-on: ubuntu-latest
     environment: production
     env:
-      REPO: DeliciousBuding/anyrouter-check-in
+      REPO: DeliciousBuding/newapi-check-in
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 同步上游 main 到本 fork
-        id: sync
-        continue-on-error: true
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-        with:
-          upstream_sync_repo: millylee/anyrouter-check-in
-          upstream_sync_branch: main
-          target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 同步异常飞书通知
-        if: steps.sync.outcome == 'failure'
-        env:
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          PR_CREATED: ${{ steps.sync.outputs.pr_created }}
-          PR_URL: ${{ steps.sync.outputs.pr_url }}
-          REPO: ${{ env.REPO }}
-        run: |
-          if [ "${PR_CREATED:-false}" = "true" ]; then
-            TEXT="⚠️ anyrouter-check-in 上游同步冲突，已自动开 PR 请处理: ${PR_URL}"
-          else
-            TEXT="⚠️ anyrouter-check-in 上游同步异常，请查看日志: https://github.com/${REPO}/actions"
-          fi
-          curl -fsSL -X POST "$FEISHU_WEBHOOK" \
-            -H 'Content-Type: application/json' \
-            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$TEXT\"}}"
-
       - name: secrets 覆盖度自检
         id: audit
         env:
-          # 本 fork checkin/proxy secret 清单；为空视为未配置
+          # 账号配置名保留 ANYROUTER_ACCOUNTS 以兼容既有部署，不代表项目只支持 AnyRouter。
           ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
           PROVIDERS: ${{ secrets.PROVIDERS }}
           PROXY_SUBSCRIPTION_URL: ${{ secrets.PROXY_SUBSCRIPTION_URL }}
@@ -77,17 +43,19 @@ jobs:
         run: |
           set -euo pipefail
           required="ANYROUTER_ACCOUNTS"
-          if printf '%s' "${ANYROUTER_ACCOUNTS:-}" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if isinstance(data, list) and any(isinstance(account, dict) and account.get("provider", "anyrouter") == "agentrouter" for account in data) else 1)' 2>/dev/null; then
-            required="$required PROXY_SUBSCRIPTION_URL"
-            echo "AgentRouter accounts detected; proxy subscription is required"
-          fi
-          optional="PROVIDERS PROXY_SUBSCRIPTION_URL_FALLBACK PROXY_NODE_FILTER DINGDING_WEBHOOK EMAIL_USER EMAIL_PASS EMAIL_TO EMAIL_SENDER CUSTOM_SMTP_SERVER PUSHPLUS_TOKEN SERVERPUSHKEY FEISHU_WEBHOOK WEIXIN_WEBHOOK TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY BARK_KEY BARK_SERVER"
+          optional="PROVIDERS PROXY_SUBSCRIPTION_URL PROXY_SUBSCRIPTION_URL_FALLBACK PROXY_NODE_FILTER DINGDING_WEBHOOK EMAIL_USER EMAIL_PASS EMAIL_TO EMAIL_SENDER CUSTOM_SMTP_SERVER PUSHPLUS_TOKEN SERVERPUSHKEY FEISHU_WEBHOOK WEIXIN_WEBHOOK TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID GOTIFY_URL GOTIFY_TOKEN GOTIFY_PRIORITY BARK_KEY BARK_SERVER"
           missing_required=""
           missing_optional=""
           for var in $required; do
             value="${!var:-}"
             if [ -z "$value" ]; then missing_required="$missing_required $var"; fi
           done
+          if printf '%s' "${ANYROUTER_ACCOUNTS:-}" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if isinstance(data, list) and any(isinstance(account, dict) and account.get("provider", "anyrouter") == "agentrouter" for account in data) else 1)' 2>/dev/null; then
+            echo "AgentRouter accounts detected; proxy subscription is required"
+            if [ -z "${PROXY_SUBSCRIPTION_URL:-}" ] && [ -z "${PROXY_SUBSCRIPTION_URL_FALLBACK:-}" ]; then
+              missing_required="$missing_required PROXY_SUBSCRIPTION_URL/PROXY_SUBSCRIPTION_URL_FALLBACK"
+            fi
+          fi
           for var in $optional; do
             value="${!var:-}"
             if [ -z "$value" ]; then missing_optional="$missing_optional $var"; fi
@@ -107,7 +75,19 @@ jobs:
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           MISSING: ${{ steps.audit.outputs.missing_secrets }}
+          REPO: ${{ env.REPO }}
         run: |
+          if [ -z "${FEISHU_WEBHOOK:-}" ]; then
+            echo "FEISHU_WEBHOOK 未配置，跳过通知"
+            exit 0
+          fi
+          TEXT="⚠️ newapi-check-in 必须 secret 缺失: ${MISSING}，签到将无法运行。请检查 https://github.com/${REPO}/settings/secrets/actions"
           curl -fsSL -X POST "$FEISHU_WEBHOOK" \
             -H 'Content-Type: application/json' \
-            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ anyrouter-check-in 必须 secret 缺失: ${MISSING}，签到将无法运行，请到 Settings → Secrets 补充\"}}"
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$TEXT\"}}"
+
+      - name: 失败状态
+        if: steps.audit.outputs.missing_secrets != ''
+        run: |
+          echo "必须 secret 缺失，配置健康检查失败"
+          exit 1

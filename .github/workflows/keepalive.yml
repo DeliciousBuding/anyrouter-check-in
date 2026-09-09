@@ -22,7 +22,7 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            const workflows = ['checkin.yml', 'keepalive.yml', 'sync-upstream.yml'];
+            const workflows = ['checkin.yml', 'keepalive.yml', 'healthcheck.yml'];
 
             for (const workflow_id of workflows) {
               await github.rest.actions.enableWorkflow({

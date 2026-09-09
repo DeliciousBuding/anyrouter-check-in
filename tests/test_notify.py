@@ -232,7 +232,7 @@ def test_email_templates_are_operator_friendly():
 		total_balance=10.0,
 		total_delta=0.0,
 	)
-	assert subject.startswith('[AnyRouter] 签到失败')
+	assert subject.startswith('[NewAPI Check-in] 签到失败')
 	assert '<table' in body
 	assert '失败' in body
 

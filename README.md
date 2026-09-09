@@ -1,9 +1,9 @@
 # NewAPI Check-in
 
-[![GitHub Actions](https://github.com/DeliciousBuding/anyrouter-check-in/workflows/PR%20Quality%20Checks/badge.svg)](https://github.com/DeliciousBuding/anyrouter-check-in/actions)
+[![GitHub Actions](https://github.com/DeliciousBuding/newapi-check-in/workflows/PR%20Quality%20Checks/badge.svg)](https://github.com/DeliciousBuding/newapi-check-in/actions)
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![License](https://img.shields.io/github/license/DeliciousBuding/anyrouter-check-in)](LICENSE)
+[![License](https://img.shields.io/github/license/DeliciousBuding/newapi-check-in)](LICENSE)
 
 面向 NewAPI / OneAPI 的多账号自动签到工具，内置 AnyRouter 与 AgentRouter 支持，可直接运行在 GitHub Actions，也支持本地运行。
 
@@ -33,7 +33,7 @@ AgentRouter 没有独立的签到接口，`access_token` 不能替代一次真�
 
 ### 1. 创建自己的仓库
 
-点击 GitHub 页面右上角的 `Fork`，把项目复制到自己的账户。
+点击 GitHub 页面右上角的 `Fork`，或克隆本仓库作为自己的起点。
 
 ### 2. 配置生产环境
 
@@ -62,9 +62,9 @@ AgentRouter 没有独立的签到接口，`access_token` 不能替代一次真�
 
 ### 3. 启用 Actions
 
-进入 `Actions`，启用 `AnyRouter 自动签到` 和 `Keepalive`。首次运行建议手动触发一次：
+进入 `Actions`，启用 `NewAPI 自动签到` 和 `Keepalive`。首次运行建议手动触发一次：
 
-`Actions -> AnyRouter 自动签到 -> Run workflow`
+`Actions -> NewAPI 自动签到 -> Run workflow`
 
 ## 账号配置
 
@@ -219,7 +219,7 @@ AgentRouter 以 UTC 日历日判断成功，并在成功后的 6 小时内跳过
 
 ## Keepalive
 
-公开仓的 scheduled workflow 在 60 天无仓库活动后会被 GitHub 自动禁用。仓库内的 `Keepalive` workflow 每周通过 GitHub REST API 重新启用签到、Keepalive 和上游健康检查 workflow，从而重置不活动计时。
+公开仓的 scheduled workflow 在 60 天无仓库活动后会被 GitHub 自动禁用。仓库内的 `Keepalive` workflow 每周通过 GitHub REST API 重新启用签到、Keepalive 和配置健康检查 workflow，从而重置不活动计时。
 
 保活只能防止“定时任务被 GitHub 自动禁用”，不能替代签到逻辑本身的重试和代理容错。
 
