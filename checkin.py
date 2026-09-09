@@ -938,7 +938,7 @@ async def main():
 	else:
 		print('[INFO] Debug mode disabled (set DEBUG_MODE=true to enable screenshots and verbose logs)')
 
-	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started')
+	print('[SYSTEM] NewAPI multi-account auto check-in script started')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	app_config = AppConfig.load_from_env()
