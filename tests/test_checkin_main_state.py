@@ -23,6 +23,15 @@ class FakeAppConfig:
 		return None
 
 
+def test_select_accounts_supports_index_and_log_label():
+	accounts = [FakeAccount(), FakeAccount()]
+
+	assert checkin._select_accounts(accounts, '2') == [(1, accounts[1])]
+	assert checkin._select_accounts(accounts, 'anyrouter-1') == [(0, accounts[0])]
+	assert checkin._select_accounts(accounts, '') == [(0, accounts[0]), (1, accounts[1])]
+	assert checkin._select_accounts(accounts, 'missing') == []
+
+
 async def test_main_persists_first_account_before_later_account_crashes(monkeypatch, tmp_path):
 	accounts = [FakeAccount(), FakeAccount()]
 	calls = 0

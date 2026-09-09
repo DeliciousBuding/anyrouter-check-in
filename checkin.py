@@ -65,6 +65,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
 	return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _select_accounts(accounts: list[Any], raw_filter: str | None) -> list[tuple[int, Any]]:
+	"""按序号或公开日志标签选择账号，保留原始索引以维持稳定 state key。"""
+
+	filter_value = (raw_filter or '').strip().lower()
+	indexed = list(enumerate(accounts))
+	if not filter_value:
+		return indexed
+
+	return [
+		(index, account)
+		for index, account in indexed
+		if filter_value in {str(index + 1), account.get_log_label(index).lower()}
+	]
+
+
 def _max_backoff_hours() -> float:
 	"""失败退避上限；默认 6h，保证一天内至少多次尝试。"""
 
@@ -966,6 +981,14 @@ async def main():
 		sys.exit(1)
 
 	print(f'[INFO] Found {len(accounts)} account configurations')
+	account_filter = os.getenv('CHECKIN_ACCOUNT_FILTER')
+	targeted_run = bool((account_filter or '').strip())
+	selected_accounts = _select_accounts(accounts, account_filter)
+	if not selected_accounts:
+		print('[FAILED] CHECKIN_ACCOUNT_FILTER 未匹配到账号；请使用序号或日志标签（如 5 / agentrouter-5）')
+		sys.exit(1)
+	if targeted_run:
+		print(f'[INFO] Account filter matched {len(selected_accounts)} account(s)')
 
 	retry_policy = RetryPolicy.from_env()
 	egress_controller = EgressController.from_env()
@@ -981,14 +1004,14 @@ async def main():
 	last_total_quota = last_snapshot['total_quota'] if last_snapshot else 0.0
 
 	success_count = 0
-	total_count = len(accounts)
+	total_count = len(selected_accounts)
 	notification_content: list[str] = []
 	current_balances: dict[str, dict[str, float]] = {}
 	account_check_in_details: dict[str, dict[str, Any]] = {}
 	need_notify = False
 	balance_changed = False
 
-	for i, account in enumerate(accounts):
+	for i, account in selected_accounts:
 		account_key = f'account_{i + 1}'
 		state_key = account.get_state_key(i)
 		try:
@@ -1160,12 +1183,17 @@ async def main():
 		# 每个账号处理完立即原子落盘，后续账号异常时已成功状态仍可持久化。
 		state_store.save()
 
-		current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
-		current_total_quota = (
-			sum(v['quota'] + float(v.get('bonus', 0.0) or 0.0) for v in current_balances.values())
-			if current_balances
-			else 0.0
-		)
+		if targeted_run:
+			# 定向重试只包含一个账号，不能用它的余额覆盖全局快照。
+			current_balance_hash = None
+			current_total_quota = 0.0
+		else:
+			current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
+			current_total_quota = (
+				sum(v['quota'] + float(v.get('bonus', 0.0) or 0.0) for v in current_balances.values())
+				if current_balances
+				else 0.0
+			)
 		if current_balance_hash:
 			if last_balance_hash is None:
 				balance_changed = True
@@ -1183,7 +1211,7 @@ async def main():
 	state_store.save()
 
 	if balance_changed:
-		for i, account in enumerate(accounts):
+		for i, account in selected_accounts:
 			account_key = f'account_{i + 1}'
 			if account_key in account_check_in_details:
 				detail = account_check_in_details[account_key]
@@ -1197,7 +1225,7 @@ async def main():
 
 	# 收集结构化结果 → 智能通知（飞书卡片 每次 / 邮件 按状态机）
 	structured_results = []
-	for i, account in enumerate(accounts):
+	for i, account in selected_accounts:
 		detail = account_check_in_details.get(f'account_{i + 1}', {})
 		identity = account.get_identity(i)
 		structured_results.append(

@@ -10,10 +10,14 @@ on:
         default: false
         type: boolean
       force:
-        description: 忽略每日登录门禁，强制执行本次签到
+        description: 忽略每日登录门禁和失败退避，强制执行本次签到
         required: false
         default: false
         type: boolean
+      account:
+        description: 仅运行指定账号（序号或日志标签，如 5 或 agentrouter-5）
+        required: false
+        type: string
 
 concurrency:
   group: checkin-${{ github.ref }}
@@ -134,6 +138,7 @@ jobs:
         CHECKIN_MAX_BACKOFF_HOURS: '6'
         CHECKIN_STATE_FILE: checkin_state.json
         CHECKIN_FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' && 'true' || 'false' }}
+        CHECKIN_ACCOUNT_FILTER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.account || '' }}
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         PROVIDERS: ${{ secrets.PROVIDERS }}
         FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
