@@ -129,8 +129,8 @@ jobs:
         CHECKIN_HUMANIZE: true
         CHECKIN_WAIT_TIMEOUT_MS: 120000
         CHECKIN_STRICT: 'true'
-        CHECKIN_MAX_ATTEMPTS: '4'
-        CHECKIN_MAX_EGRESS_ROTATIONS: '3'
+        CHECKIN_MAX_ATTEMPTS: '5'
+        CHECKIN_MAX_EGRESS_ROTATIONS: '4'
         CHECKIN_MAX_BACKOFF_HOURS: '6'
         CHECKIN_STATE_FILE: checkin_state.json
         CHECKIN_FORCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' && 'true' || 'false' }}
