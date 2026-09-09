@@ -520,10 +520,13 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 	"""跳转 /console 并拦截 /api/user/self，用浏览器会话确认登录用户。"""
 	verify_timeout = min(timeout_ms, SESSION_WAIT_TIMEOUT_MS)
 	captured_profile: dict | None = None
+	last_user_self_status: int | None = None
 	verified = asyncio.Event()
 
 	async def on_response(response) -> None:
-		nonlocal captured_profile
+		nonlocal captured_profile, last_user_self_status
+		if USER_SELF_API_SUFFIX in response.url:
+			last_user_self_status = response.status
 		if captured_profile is not None:
 			return
 		profile = await _parse_user_self_response(response)
@@ -554,7 +557,13 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		return captured_profile
 
 	if CONSOLE_PATH in page.url.lower():
-		print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no user profile')
+		if last_user_self_status is not None:
+			print(
+				f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned HTTP '
+				f'{last_user_self_status} without a user profile'
+			)
+		else:
+			print(f'[WARN] Reached {CONSOLE_PATH} but {USER_SELF_API_SUFFIX} returned no response')
 	else:
 		debug_print(f'[WARN] Login verification failed: current URL={sanitize_login_message(page.url)}')
 		print('[WARN] Login verification failed')
