@@ -201,6 +201,7 @@ AgentRouter 以 UTC 日历日判断成功，并在成功后的 6 小时内跳过
 - 公开仓默认不缓存 `.browser_profiles`
 - 只有私有仓库或自建 runner 才建议设置 `ENABLE_BROWSER_PROFILE_CACHE=true`
 - `DEBUG_MODE=true` 可能生成截图和详细日志，公开仓不要开启
+- `DIAGNOSTIC_MODE=true` 只输出脱敏诊断日志，不上传截图，适合公开仓排查
 
 ## 通知
 

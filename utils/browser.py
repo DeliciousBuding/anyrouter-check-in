@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from utils.debug import debug_print, is_debug_enabled
+from utils.debug import debug_print, diagnostic_print, is_debug_enabled, is_diagnostic_enabled
 from utils.popups import dismiss_popups, setup_popup_guard
 from utils.proxy import get_playwright_proxy
 from utils.retry import FailureKind, LoginFlowError, classify_failure
@@ -574,6 +574,21 @@ async def verify_browser_login(page: Page, console_url: str, timeout_ms: int) ->
 		# 公开仓 debug 日志也不打印 id/username；只保留链路是否验证成功。
 		print('[INFO] Login verified')
 		return captured_profile
+
+	if is_diagnostic_enabled():
+		try:
+			cookie_names = sorted(
+				{str(cookie.get('name')) for cookie in await page.context.cookies() if cookie.get('name')}
+			)
+			storage_keys = await page.evaluate(
+				'() => ({local: Object.keys(localStorage), session: Object.keys(sessionStorage)})'
+			)
+			diagnostic_print(
+				f'[DIAG] verification url={sanitize_login_message(page.url)} '
+				f'cookie_names={cookie_names} storage_keys={storage_keys}'
+			)
+		except Exception:  # nosec B110
+			pass
 
 	if CONSOLE_PATH in page.url.lower():
 		if last_user_self_status is not None:

@@ -18,6 +18,11 @@ on:
         description: 仅运行指定账号（序号或日志标签，如 5 或 agentrouter-5）
         required: false
         type: string
+      diagnostic:
+        description: 输出脱敏诊断日志（不上传截图）
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: checkin-${{ github.ref }}
@@ -32,6 +37,7 @@ jobs:
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: 1
       DEBUG_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug == 'true' && 'true' || 'false' }}
+      DIAGNOSTIC_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.diagnostic == 'true' && 'true' || 'false' }}
     steps:
     - uses: actions/checkout@v6
 
@@ -129,6 +135,7 @@ jobs:
     - name: 执行签到
       env:
         DEBUG_MODE: ${{ env.DEBUG_MODE }}
+        DIAGNOSTIC_MODE: ${{ env.DIAGNOSTIC_MODE }}
         CHECKIN_HEADLESS: false
         CHECKIN_HUMANIZE: true
         CHECKIN_WAIT_TIMEOUT_MS: 120000

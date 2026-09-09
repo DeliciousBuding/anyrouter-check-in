@@ -38,7 +38,7 @@ from utils.browser import (
 	wait_for_waf_ready,
 )
 from utils.config import AccountConfig, AppConfig, load_accounts_config
-from utils.debug import debug_print, is_debug_enabled
+from utils.debug import debug_print, is_debug_enabled, is_diagnostic_enabled
 from utils.egress import EgressController, EgressRotator
 from utils.notify import smart_notify
 from utils.proxy import get_playwright_proxy, get_proxy_server
@@ -314,6 +314,11 @@ async def login_with_credentials(
 				f'[INFO] {account_name}: Login API status={form_result.api_status} '
 				f'success={form_result.api_success} message={form_result.api_message or "none"}'
 			)
+			if is_diagnostic_enabled():
+				cookie_names = sorted(
+					{str(cookie.get('name')) for cookie in await context.cookies() if cookie.get('name')}
+				)
+				print(f'[DIAG] {account_name}: post-login cookie names={cookie_names}')
 			if form_result.api_status == 429:
 				raise LoginFlowError(FailureKind.RATE_LIMITED, 'login API rate limited')
 			if form_result.api_status in (401, 403):
@@ -948,14 +953,16 @@ def run_check_in_requests(
 async def main():
 	"""主函数"""
 	if is_debug_enabled():
-		print('[INFO] DEBUG_MODE enabled')
+		print('[INFO] DEBUG_MODE enabled (verbose logs and screenshots)')
 		proxy_server = os.getenv('CHECKIN_PROXY_URL', '').strip()
 		if proxy_server:
 			print(f'[INFO] Proxy endpoint available: {proxy_server} (enabled per provider use_proxy)')
 		else:
 			print('[INFO] CHECKIN_PROXY_URL not set; providers with use_proxy=true will run without proxy')
+	elif is_diagnostic_enabled():
+		print('[INFO] DIAGNOSTIC_MODE enabled (sanitized logs, screenshots disabled)')
 	else:
-		print('[INFO] Debug mode disabled (set DEBUG_MODE=true to enable screenshots and verbose logs)')
+		print('[INFO] Diagnostic mode disabled (set DIAGNOSTIC_MODE=true for sanitized verbose logs)')
 
 	print('[SYSTEM] NewAPI multi-account auto check-in script started')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')

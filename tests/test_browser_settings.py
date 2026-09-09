@@ -114,6 +114,16 @@ def test_browser_login_settings_uses_stable_per_account_seed(monkeypatch, tmp_pa
 	assert 10000 <= first.fingerprint_seed <= 99999
 
 
+def test_diagnostic_mode_is_separate_from_debug_screenshots(monkeypatch):
+	from utils.debug import is_debug_enabled, is_diagnostic_enabled
+
+	monkeypatch.delenv('DEBUG_MODE', raising=False)
+	monkeypatch.setenv('DIAGNOSTIC_MODE', 'true')
+
+	assert is_diagnostic_enabled() is True
+	assert is_debug_enabled() is False
+
+
 def test_login_message_redacts_identity_and_tokens():
 	fake_value = 'sk-' + ('x' * 16)
 	message = sanitize_login_message(f'user@example.com Bearer abc.def {fake_value} token=secret cookie=session-value')
