@@ -16,9 +16,24 @@
 
 set -euo pipefail
 
-if [[ -z "${PROXY_SUBSCRIPTION_URL:-}" ]]; then
-	echo "[INFO] PROXY_SUBSCRIPTION_URL not set, skip proxy setup"
+PROXY_SUBSCRIPTION_URL="${PROXY_SUBSCRIPTION_URL:-}"
+PROXY_SUBSCRIPTION_URL_FALLBACK="${PROXY_SUBSCRIPTION_URL_FALLBACK:-}"
+
+# 允许只配置备用订阅：此时它直接作为主 provider 使用。
+# 这样轮换配置里任何一个订阅失效时，另一个仍可独立启动代理。
+PRIMARY_SUBSCRIPTION_URL="${PROXY_SUBSCRIPTION_URL:-${PROXY_SUBSCRIPTION_URL_FALLBACK}}"
+FALLBACK_SUBSCRIPTION_URL=""
+if [[ -n "${PROXY_SUBSCRIPTION_URL}" && -n "${PROXY_SUBSCRIPTION_URL_FALLBACK}" ]]; then
+	FALLBACK_SUBSCRIPTION_URL="${PROXY_SUBSCRIPTION_URL_FALLBACK}"
+fi
+
+if [[ -z "${PRIMARY_SUBSCRIPTION_URL}" ]]; then
+	echo "[INFO] No proxy subscription configured, skip proxy setup"
 	exit 0
+fi
+
+if [[ -z "${PROXY_SUBSCRIPTION_URL}" && -n "${PROXY_SUBSCRIPTION_URL_FALLBACK}" ]]; then
+	echo "[INFO] Primary subscription missing; using fallback subscription as primary (URL withheld)"
 fi
 
 PROXY_DIR="${RUNNER_TEMP:-/tmp}/checkin-proxy"
@@ -26,7 +41,6 @@ PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TEST_URL="${PROXY_TEST_URL:-https://www.google.com/generate_204}"
 PROXY_NODE_FILTER="${PROXY_NODE_FILTER:-}"
 PROXY_PROBE_URL="${PROXY_PROBE_URL:-}"
-PROXY_SUBSCRIPTION_URL_FALLBACK="${PROXY_SUBSCRIPTION_URL_FALLBACK:-}"
 MIHOMO_VERSION="${MIHOMO_VERSION:-v1.19.0}"
 PROXY_REQUIRED="${PROXY_REQUIRED:-false}"
 # 本地控制面只用于自检选路结果；口令每次随机生成，不来自 secret、也不落日志
@@ -62,12 +76,12 @@ fi
 
 FALLBACK_PROVIDER_YAML=""
 FALLBACK_USE_YAML=""
-if [[ -n "${PROXY_SUBSCRIPTION_URL_FALLBACK}" ]]; then
+if [[ -n "${FALLBACK_SUBSCRIPTION_URL}" ]]; then
 	FALLBACK_PROVIDER_YAML=$(cat <<FALLBACK_EOF
 
   subscription_fallback:
     type: http
-    url: "${PROXY_SUBSCRIPTION_URL_FALLBACK}"
+    url: "${FALLBACK_SUBSCRIPTION_URL}"
     interval: 3600
     path: ./subscription-fallback.yaml
     health-check:
@@ -94,7 +108,7 @@ secret: "${PROXY_API_SECRET}"
 proxy-providers:
   subscription:
     type: http
-    url: "${PROXY_SUBSCRIPTION_URL}"
+    url: "${PRIMARY_SUBSCRIPTION_URL}"
     interval: 3600
     path: ./subscription.yaml
     health-check:

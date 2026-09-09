@@ -49,7 +49,7 @@ AgentRouter 没有独立的签到接口，`access_token` 不能替代一次真�
 代理相关 Secret：
 
 - `PROXY_SUBSCRIPTION_URL`：主订阅，可选但 AgentRouter 必需
-- `PROXY_SUBSCRIPTION_URL_FALLBACK`：备用订阅，可选
+- `PROXY_SUBSCRIPTION_URL_FALLBACK`：备用订阅，可选；主订阅未配置时可单独使用
 - `PROXY_NODE_FILTER`：节点名过滤正则，可选
 
 通知相关 Secret：
